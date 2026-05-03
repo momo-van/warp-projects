@@ -1,0 +1,2 @@
+# Keep benchmark output plots in version control
+!*.png
