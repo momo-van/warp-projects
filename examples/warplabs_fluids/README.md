@@ -1,8 +1,9 @@
 # warplabs-fluids
 
 Experimental GPU-accelerated compressible flow solver built on [NVIDIA Warp](https://github.com/NVIDIA/warp).
+Validated against a JAX reference implementation with identical numerics.
 
-**Status:** Phase 1 — 1-D compressible Euler, V&V in progress.
+**Phase 1 complete.** 1-D compressible Euler, WENO3-HLLC-RK2, float32.
 
 ---
 
@@ -25,10 +26,10 @@ Kernel boundaries sit at global-memory write points.
 
 ```
 bc_kernel          1 launch   fill ghost cells
-compute_flux_1d    1 launch   WENO3 + HLLC → F   (Q_L/Q_R stay in registers)
+compute_flux_1d    1 launch   WENO3 + HLLC fused  (Q_L/Q_R stay in registers)
 update_rk_1d       1 launch   RK stage update
-─────────────────────────────
-3 launches × 2 RK stages = 6 launches per timestep
+─────────────────────────────────────────────
+3 launches x 2 RK stages = 6 launches per timestep
 ```
 
 ---
@@ -36,7 +37,7 @@ update_rk_1d       1 launch   RK stage update
 ## Install
 
 ```powershell
-pip install warp-lang numpy scipy
+pip install warp-lang numpy scipy matplotlib jax
 ```
 
 ---
@@ -72,8 +73,30 @@ rho_out = solver.state[0]
 python -m pytest tests/ -v
 ```
 
-Unit tests (`test_primitives`, `test_weno3`, `test_hllc`) run on CPU — no GPU required.
-V&V tests (`test_sod`, `test_conservation`) also run on CPU via Warp's LLVM backend.
+15 tests covering: primitives roundtrip, WENO3 order/bias, HLLC rest/supersonic/Sod,
+Sod L1 vs exact Riemann (N=256,512), mass+momentum conservation (periodic BC).
+All tests run on Warp CPU — no CUDA required.
+
+---
+
+## Benchmarks
+
+```powershell
+python benchmarks/compare_sod.py       # accuracy + single-N throughput
+python benchmarks/scaling_benchmark.py # throughput vs N, finds GPU crossover
+```
+
+**Results on RTX 5000 Ada / Intel Core Ultra 9:**
+
+| N | JAX CPU | Warp CPU | Warp CUDA |
+|---|---|---|---|
+| 512 | 15.4 | 3.9 | 3.4 |
+| 4096 | 17.7 | 8.4 | **26.4** |
+| 32768 | 38.0 | 10.0 | **208.6** |
+
+Throughput in Mcell-updates/s. Warp CUDA crossover vs JAX CPU at N~4096; 5.5x ahead at N=32768.
+
+![Scaling benchmark](benchmarks/sod_scaling.png)
 
 ---
 
@@ -81,7 +104,6 @@ V&V tests (`test_sod`, `test_conservation`) also run on CPU via Warp's LLVM back
 
 | Phase | Status | Scope |
 |---|---|---|
-| 1 | **active** | 1-D Euler, WENO3-HLLC, Sod V&V |
-| 2 | planned | 2-D Euler, Strang splitting, Kelvin-Helmholtz |
-| 3 | planned | 2-D Navier-Stokes (viscous + heat) |
-| Bench | planned | Warp vs JaxFluids throughput comparison |
+| 1 | **complete** | 1-D Euler, WENO3-HLLC, Sod V&V, N-scaling benchmark |
+| 2 | next | 2-D Euler, Strang splitting, Kelvin-Helmholtz V&V |
+| 3 | planned | 2-D Navier-Stokes (viscous + heat), Taylor-Green |

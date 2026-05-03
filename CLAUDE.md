@@ -12,14 +12,30 @@ Owner: mmohajerani@nvidia.com (NVIDIA)
 
 ## Purpose
 
-This repo is a hands-on exploration space for:
-- Writing custom Warp CUDA kernels for physics solvers
-- Geometry processing algorithms (mesh operations, SDFs, parametric surfaces)
-- Bridging Warp with visualization tools (Rerun, USD, matplotlib)
-- Eventually: surrogate models (PhysicsNeMo) + Warp kernel integration
+Hands-on exploration of Warp standalone (no Newton). Two goals running in parallel:
+1. Build `warplabs-fluids` — a Warp-native compressible CFD solver validated against JAX reference implementations, with throughput benchmarks demonstrating GPU advantage
+2. Expand to other physics domains over time (FEM, geometry processing, waves, etc.)
 
-It is **not** tied to Newton (that lives in `newton-examples`). Warp is used here standalone or
-with lightweight scientific Python stacks.
+It is **not** tied to Newton (that lives in `newton-examples`).
+
+---
+
+## Active example: warplabs-fluids
+
+`examples/warplabs_fluids/` — 1-D compressible Euler solver, Phase 1 complete.
+See `examples/warplabs_fluids/CLAUDE.md` for full context.
+
+**Phase 1 status: COMPLETE**
+- WarpEuler1D: WENO3-HLLC-RK2, 1D, float32
+- JaxEuler1D: identical scheme in JAX (reference)
+- 15/15 tests pass (CPU, no GPU needed)
+- Sod V&V: L1(rho)=1.73e-3 at N=512, identical across JAX and Warp
+- Scaling benchmark: Warp CUDA crossover vs JAX CPU at N~4096; 5.5× faster at N=32768
+
+**Next: Phase 2**
+- 2-D Euler with Strang splitting
+- Kelvin-Helmholtz instability V&V
+- 2-D scaling benchmark
 
 ---
 
@@ -28,59 +44,31 @@ with lightweight scientific Python stacks.
 | Layer | Library |
 |---|---|
 | GPU kernels | [Warp](https://github.com/NVIDIA/warp) (`warp-lang`) |
+| JAX reference | `jax[cpu]` (CPU only on Windows; GPU requires Linux/WSL2) |
 | Numerics | numpy, scipy |
-| 3-D geometry | trimesh, Shapely, open3d (as needed) |
-| Visualization | Rerun (`rerun-sdk`), matplotlib, polyscope (as needed) |
-| Scene format | USD (`usd-core`, `pxr`) — Z-up, metres (when needed) |
-| Tests | pytest — stub-based where GPU not available |
+| Visualization | matplotlib (2-D plots), Rerun (3-D, future) |
+| Tests | pytest — Warp CPU backend, no CUDA required |
 
-Core install: `pip install warp-lang numpy`
-
----
-
-## Repo layout
-
-```
-examples/
-  <example_name>/      # one folder per example
-    *.py               # simulation / geometry scripts
-    README.md          # per-example description + run instructions
-    tests/
-      test_*.py        # pytest unit tests (stub-based, no GPU required)
-```
+Core install: `pip install warp-lang numpy scipy jax matplotlib`
 
 ---
 
 ## Conventions
 
-- All units SI (metres, radians, seconds) unless problem domain dictates otherwise
-- Warp kernels: `@wp.kernel`, launched with `wp.launch(...)`
-- Keep GPU-free logic separable so tests run without CUDA
-- Test stubs live inside the test file — no separate conftest stubs per example
-- Visualisation: prefer Rerun for 3-D, matplotlib for 2-D plots
-
----
-
-## Domain focus areas
-
-| Domain | Notes |
-|---|---|
-| Computational fluid dynamics | SPH, grid-based, lattice Boltzmann |
-| Solid mechanics / FEM | Elasticity, contact, plasticity |
-| Geometry processing | SDF construction, mesh smoothing, remeshing, Booleans |
-| Heat transfer | Conduction, convection kernels |
-| Wave physics | Acoustic / elastic wave propagation |
-| ML-physics coupling | PhysicsNeMo surrogate injection points |
+- All units SI
+- `@wp.func` = logical unit, runs in registers (no global memory I/O)
+- `@wp.kernel` = memory boundary (one launch per global write point)
+- 3 kernel launches × 2 RK stages = 6 launches per timestep
+- Ghost cells embedded in state array (ng=2 for WENO3)
+- Tests run on Warp CPU backend — no CUDA required
 
 ---
 
 ## Running
 
 ```powershell
-# Run a specific example
-cd examples\<example_name>
-python <script>.py
-
-# Run all tests (no GPU needed)
-python -m pytest examples\ -v
+cd examples\warplabs_fluids
+python -m pytest tests/ -v                     # all 15 tests
+python benchmarks\compare_sod.py               # Sod accuracy + throughput
+python benchmarks\scaling_benchmark.py         # N-scaling across all backends
 ```
