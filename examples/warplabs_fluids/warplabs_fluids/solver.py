@@ -74,6 +74,7 @@ class WarpEuler1D:
         Q_ext = np.zeros((NVARS_1D, self._N_ext), dtype=np.float32)
         Q_ext[:, NG : NG + self.N] = Q0.astype(np.float32)
         self._Q = wp.from_numpy(Q_ext, dtype=float, device=self.device)
+        self._t = 0.0
         self._apply_bc(self._Q)
 
     def step(self, dt: float) -> None:
@@ -99,13 +100,14 @@ class WarpEuler1D:
         a   = np.sqrt(np.abs(self.gamma * p / rho))
         return cfl * self.dx / float(np.max(np.abs(u) + a))
 
-    def run(self, t_end: float, cfl: float = 0.4, n_max: int = 10_000_000) -> None:
-        """Run to t_end using adaptive CFL timestepping."""
-        for _ in range(n_max):
-            if self._t >= t_end:
-                break
+    def run(self, t_end: float, cfl: float = 0.4, n_max: int = 10_000_000) -> int:
+        """Run to t_end using adaptive CFL timestepping. Returns step count."""
+        n = 0
+        while self._t < t_end and n < n_max:
             dt = min(self.compute_dt(cfl), t_end - self._t)
             self.step(dt)
+            n += 1
+        return n
 
     @property
     def state(self) -> np.ndarray:
