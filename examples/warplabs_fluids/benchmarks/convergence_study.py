@@ -1,8 +1,10 @@
 """
 Convergence study: JaxFluids vs Warp CUDA vs JAX CUDA — Sod shock tube.
 
-Runs N = 64, 128, 256, 512, 1024 and measures L1 error vs exact Riemann.
-Plots log-log convergence curves with least-squares slope (order of accuracy).
+Two metrics at N = 64, 128, 256, 512, 1024:
+  1. Global L1  — dominated by discontinuities, all solvers ~O(N^-1)
+  2. Smooth-region L1 (rarefaction fan only, x ∈ [0.27, 0.47]) — reveals true
+     scheme order: WENO5-Z (f64) vs WENO3 (f32), including float32 precision floor
 
 Run inside the Python 3.11 JaxFluids venv:
   source /root/venv-jf/bin/activate
@@ -32,6 +34,17 @@ GAMMA      = 1.4
 T_END      = 0.2
 CFL        = 0.4
 
+# Sod rarefaction fan at t=0.2: smooth region between head and tail
+# Head speed: u_L - c_L = 0 - sqrt(1.4) = -1.183 → x_head = 0.5 - 1.183*0.2 = 0.263
+# Tail speed: u_star - c_star ≈ 0.927 - 0.998 = -0.071 → x_tail = 0.5 - 0.071*0.2 = 0.486
+X_SMOOTH_LO = 0.27   # just inside rarefaction head
+X_SMOOTH_HI = 0.47   # just inside rarefaction tail
+
+
+def l1_region(q_num, q_ref, x, dx, x_lo, x_hi):
+    mask = (x >= x_lo) & (x <= x_hi)
+    return float(np.sum(np.abs(q_num[mask] - q_ref[mask])) * dx)
+
 
 # ── JaxFluids runner ──────────────────────────────────────────────────────────
 
@@ -40,9 +53,8 @@ def _patch_case(case_tmpl, N, run_dir):
     case["domain"]["x"]["cells"] = N
     case["general"]["save_path"] = str(run_dir)
     case["general"]["save_dt"]   = 999.0
-    p = run_dir / "case.json"
-    p.write_text(json.dumps(case))
-    return p
+    (run_dir / "case.json").write_text(json.dumps(case))
+    return run_dir / "case.json"
 
 
 def run_jaxfluids(N, case_tmpl, num_path, base_tmp):
@@ -65,9 +77,8 @@ def run_jaxfluids(N, case_tmpl, num_path, base_tmp):
     with h5py.File(h5_final, "r") as f:
         rho = np.array(f["primitives/density"][0, 0, :])
         u   = np.array(f["primitives/velocity"][0, 0, :, 0])
-        p_  = np.array(f["primitives/pressure"][0, 0, :])
-
-    return rho, u, p_
+        p   = np.array(f["primitives/pressure"][0, 0, :])
+    return rho, u, p
 
 
 # ── Warp CUDA runner ──────────────────────────────────────────────────────────
@@ -106,8 +117,8 @@ def run_jax(N):
 # ── slope fit ─────────────────────────────────────────────────────────────────
 
 def fit_slope(ns, errors):
-    log_n = np.log2(ns)
-    log_e = np.log2(errors)
+    log_n = np.log2(np.array(ns, float))
+    log_e = np.log2(np.array(errors, float))
     slope, _ = np.polyfit(log_n, log_e, 1)
     return slope
 
@@ -122,7 +133,7 @@ def main():
         with open(JXF_EX / "sod.json")             as f: case_tmpl = json.load(f)
         with open(JXF_EX / "numerical_setup.json")  as f: ns_dict   = json.load(f)
         jxf_ok = True
-        print(f"[info] JaxFluids templates loaded")
+        print("[info] JaxFluids templates loaded")
     except Exception as e:
         print(f"[warn] JaxFluids not available: {e}")
         jxf_ok = False
@@ -132,12 +143,12 @@ def main():
         num_path = base_tmp / "numerical_setup.json"
         num_path.write_text(json.dumps(ns_dict))
 
-    solvers = {
-        "JaxFluids\n(WENO5-Z+HLLC+RK3, f64)": {},
-        "JAX CUDA\n(WENO3+HLLC+RK2, f32)":    {},
-        "Warp CUDA\n(WENO3+HLLC+RK2, f32)":   {},
-    }
-    errs = {name: {"N": [], "rho": [], "u": [], "p": []} for name in solvers}
+    SOLVERS = [
+        "JaxFluids\n(WENO5-Z+HLLC+RK3, f64)",
+        "JAX CUDA\n(WENO3+HLLC+RK2, f32)",
+        "Warp CUDA\n(WENO3+HLLC+RK2, f32)",
+    ]
+    data = {s: {"N": [], "global": [], "smooth": []} for s in SOLVERS}
 
     for N in GRID_SIZES:
         dx = 1.0 / N
@@ -145,64 +156,65 @@ def main():
         rho_ex, u_ex, p_ex = sod_exact(T_END, x, GAMMA)
         print(f"\nN = {N}", flush=True)
 
+        runs = []
+
         if jxf_ok:
             try:
                 rho, u, p = run_jaxfluids(N, case_tmpl, num_path, base_tmp)
-                name = "JaxFluids\n(WENO5-Z+HLLC+RK3, f64)"
-                errs[name]["N"].append(N)
-                errs[name]["rho"].append(l1_error(rho, rho_ex, dx))
-                errs[name]["u"].append(l1_error(u,   u_ex,   dx))
-                errs[name]["p"].append(l1_error(p,   p_ex,   dx))
-                print(f"  JaxFluids  L1(rho)={errs[name]['rho'][-1]:.3e}", flush=True)
+                runs.append(("JaxFluids\n(WENO5-Z+HLLC+RK3, f64)", rho, u, p))
+                print(f"  JaxFluids  done", flush=True)
             except Exception as e:
                 print(f"  JaxFluids  ERROR: {e}")
 
         try:
             rho, u, p = run_jax(N)
-            name = "JAX CUDA\n(WENO3+HLLC+RK2, f32)"
-            errs[name]["N"].append(N)
-            errs[name]["rho"].append(l1_error(rho, rho_ex, dx))
-            errs[name]["u"].append(l1_error(u,   u_ex,   dx))
-            errs[name]["p"].append(l1_error(p,   p_ex,   dx))
-            print(f"  JAX CUDA   L1(rho)={errs[name]['rho'][-1]:.3e}", flush=True)
+            runs.append(("JAX CUDA\n(WENO3+HLLC+RK2, f32)", rho, u, p))
+            print(f"  JAX CUDA   done", flush=True)
         except Exception as e:
             print(f"  JAX CUDA   ERROR: {e}")
 
         try:
             rho, u, p = run_warp(N)
-            name = "Warp CUDA\n(WENO3+HLLC+RK2, f32)"
-            errs[name]["N"].append(N)
-            errs[name]["rho"].append(l1_error(rho, rho_ex, dx))
-            errs[name]["u"].append(l1_error(u,   u_ex,   dx))
-            errs[name]["p"].append(l1_error(p,   p_ex,   dx))
-            print(f"  Warp CUDA  L1(rho)={errs[name]['rho'][-1]:.3e}", flush=True)
+            runs.append(("Warp CUDA\n(WENO3+HLLC+RK2, f32)", rho, u, p))
+            print(f"  Warp CUDA  done", flush=True)
         except Exception as e:
             print(f"  Warp CUDA  ERROR: {e}")
 
-    # ── print table ───────────────────────────────────────────────────────────
-    print("\n── L1(rho) convergence ──────────────────────────────────────────────")
-    hdr = f"{'N':>6}" + "".join(f"  {n.split(chr(10))[0]:>28}" for n in solvers)
-    print(hdr); print("-" * len(hdr))
-    for N in GRID_SIZES:
-        row = f"{N:>6}"
-        for name, d in errs.items():
-            if N in d["N"]:
-                row += f"  {d['rho'][d['N'].index(N)]:>28.3e}"
-            else:
-                row += f"  {'--':>28}"
-        print(row)
+        for name, rho, u, p in runs:
+            g = l1_error(rho, rho_ex, dx)
+            s = l1_region(rho, rho_ex, x, dx, X_SMOOTH_LO, X_SMOOTH_HI)
+            data[name]["N"].append(N)
+            data[name]["global"].append(g)
+            data[name]["smooth"].append(s)
+            print(f"    {name.split(chr(10))[0]:<28}  global={g:.3e}  smooth={s:.3e}")
 
-    print("\n── Measured convergence slopes (log2 L1 vs log2 N) ─────────────────")
-    for name, d in errs.items():
+    # ── tables ────────────────────────────────────────────────────────────────
+    for metric, key in [("Global L1(rho)", "global"), ("Smooth-region L1(rho)", "smooth")]:
+        print(f"\n── {metric} ──────────────────────────────────")
+        print(f"{'N':>6}", end="")
+        for s in SOLVERS:
+            print(f"  {s.split(chr(10))[0]:>28}", end="")
+        print()
+        print("-" * 100)
+        for N in GRID_SIZES:
+            print(f"{N:>6}", end="")
+            for s in SOLVERS:
+                d = data[s]
+                if N in d["N"]:
+                    print(f"  {d[key][d['N'].index(N)]:>28.3e}", end="")
+                else:
+                    print(f"  {'--':>28}", end="")
+            print()
+
+    print("\n── Convergence slopes ──────────────────────────────────────────────")
+    for name, d in data.items():
         if len(d["N"]) >= 2:
-            s_rho = fit_slope(d["N"], d["rho"])
-            s_u   = fit_slope(d["N"], d["u"])
-            s_p   = fit_slope(d["N"], d["p"])
-            label = name.split("\n")[0]
-            print(f"  {label:<28}  rho={s_rho:.2f}  u={s_u:.2f}  p={s_p:.2f}")
+            sg = fit_slope(d["N"], d["global"])
+            ss = fit_slope(d["N"], d["smooth"])
+            print(f"  {name.split(chr(10))[0]:<28}  global slope={sg:.2f}  smooth slope={ss:.2f}")
 
-    # ── plot ──────────────────────────────────────────────────────────────────
-    colors = {
+    # ── figure: 2 rows ────────────────────────────────────────────────────────
+    colors  = {
         "JaxFluids\n(WENO5-Z+HLLC+RK3, f64)": "#e07b00",
         "JAX CUDA\n(WENO3+HLLC+RK2, f32)":    "#d55e00",
         "Warp CUDA\n(WENO3+HLLC+RK2, f32)":   "#009e73",
@@ -212,55 +224,71 @@ def main():
         "JAX CUDA\n(WENO3+HLLC+RK2, f32)":    "o",
         "Warp CUDA\n(WENO3+HLLC+RK2, f32)":   "^",
     }
-    lines = {
+    ls_map  = {
         "JaxFluids\n(WENO5-Z+HLLC+RK3, f64)": "-",
         "JAX CUDA\n(WENO3+HLLC+RK2, f32)":    "--",
         "Warp CUDA\n(WENO3+HLLC+RK2, f32)":   "-",
     }
 
-    fig, axes = plt.subplots(1, 3, figsize=(14, 5))
-    fig.suptitle(
-        "Convergence study — Sod shock tube  |  t = 0.2\n"
-        "Slopes measured by least-squares fit on log₂–log₂ grid",
-        fontsize=11, fontweight="bold"
-    )
+    fig, axes = plt.subplots(2, 1, figsize=(9, 10))
 
-    fields = ["rho", "u", "p"]
-    titles = ["density  L1(ρ)", "velocity  L1(u)", "pressure  L1(p)"]
+    row_cfg = [
+        ("global", "Global L1(ρ) — full domain",
+         "All solvers converge ~O(N⁻¹): discontinuities cap convergence rate regardless of scheme order.",
+         [(-1, ":", "O(N⁻¹)"), (-3, "-.", "O(N⁻³)")]),
+        ("smooth", f"Smooth-region L1(ρ) — rarefaction fan only  (x ∈ [{X_SMOOTH_LO}, {X_SMOOTH_HI}])",
+         "True scheme order visible: WENO5-Z (f64) maintains high-order convergence; "
+         "WENO3 (f32) hits float32 precision floor at large N.",
+         [(-1, ":", "O(N⁻¹)"), (-3, "-.", "O(N⁻³)"), (-5, "--", "O(N⁻⁵)")]),
+    ]
 
-    for ax, field, title in zip(axes, fields, titles):
-        for name, d in errs.items():
+    for ax, (key, title, subtitle, refs) in zip(axes, row_cfg):
+        n_ref = np.array([GRID_SIZES[0], GRID_SIZES[-1]], dtype=float)
+        mid   = np.sqrt(n_ref[0] * n_ref[-1])
+
+        for name, d in data.items():
             if len(d["N"]) < 2:
                 continue
             ns  = np.array(d["N"])
-            es  = np.array(d[field])
-            slope = fit_slope(ns, es)
-            label = name.replace("\n", "  ") + f"  (slope {slope:.2f})"
-            ax.plot(ns, es,
-                    marker=markers[name], ls=lines[name],
-                    color=colors[name], lw=1.8, ms=7, label=label)
+            es  = np.array(d[key])
+            sl  = fit_slope(ns, es)
+            lbl = name.replace("\n", "  ") + f"  (slope {sl:+.2f})"
+            ax.plot(ns, es, marker=markers[name], ls=ls_map[name],
+                    color=colors[name], lw=1.8, ms=7, label=lbl)
 
-        # reference lines
-        n_ref = np.array([GRID_SIZES[0], GRID_SIZES[-1]], dtype=float)
-        mid   = np.sqrt(n_ref[0] * n_ref[-1])
-        # anchor at midpoint of Warp CUDA curve if available
-        warp_d = errs["Warp CUDA\n(WENO3+HLLC+RK2, f32)"]
-        if len(warp_d["N"]) >= 2:
-            e_mid = np.interp(mid, warp_d["N"], warp_d[field])
-            for order, ls, lbl in [(1, ":", "O(N⁻¹)"), (3, "-.", "O(N⁻³)")]:
-                ref = e_mid * (n_ref / mid) ** (-order)
-                ax.plot(n_ref, ref, ls=ls, color="gray", lw=1.0, label=lbl)
+        # anchor reference lines at mid-N of Warp CUDA
+        warp_key = "Warp CUDA\n(WENO3+HLLC+RK2, f32)"
+        if data[warp_key][key]:
+            e_mid = np.interp(mid, data[warp_key]["N"], data[warp_key][key])
+            for order, lsty, lbl in refs:
+                ref = e_mid * (n_ref / mid) ** order
+                ax.plot(n_ref, ref, ls=lsty, color="gray", lw=1.0, label=lbl)
+
+        # float32 precision floor line (smooth row only)
+        if key == "smooth":
+            n_zone = (X_SMOOTH_HI - X_SMOOTH_LO)  # ~0.2 of domain
+            floor = 1.2e-7 * n_zone                # float32 eps × zone fraction
+            ax.axhline(floor, color="gray", ls=":", lw=0.8, alpha=0.6,
+                       label=f"float32 ε floor (~{floor:.1e})")
 
         ax.set_xscale("log", base=2)
         ax.set_yscale("log", base=2)
         ax.set_xlabel("N  (number of cells)", fontsize=10)
-        ax.set_ylabel("L1 error", fontsize=10)
-        ax.set_title(title, fontsize=11)
+        ax.set_ylabel("L1 error  (density)", fontsize=10)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.text(0.02, 0.04, subtitle, transform=ax.transAxes,
+                fontsize=8, color="#444", va="bottom",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7))
         ax.set_xticks(GRID_SIZES)
-        ax.set_xticklabels([str(n) for n in GRID_SIZES], fontsize=8)
-        ax.legend(fontsize=7.5, loc="upper right")
+        ax.set_xticklabels([str(n) for n in GRID_SIZES], fontsize=9)
+        ax.legend(fontsize=8, loc="upper right")
         ax.grid(True, which="both", lw=0.4, alpha=0.5)
 
+    fig.suptitle(
+        "Convergence study — Sod shock tube  |  t = 0.2\n"
+        "Least-squares slopes on log₂–log₂ grid",
+        fontsize=12, fontweight="bold", y=1.01
+    )
     plt.tight_layout()
     out = ROOT / "benchmarks" / "convergence_study.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
