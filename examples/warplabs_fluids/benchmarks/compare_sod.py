@@ -5,11 +5,13 @@ Produces:
   sod_profiles.png   — density / velocity / pressure profiles + exact solution
   sod_benchmark.png  — throughput comparison (Mcell-updates / second)
 
+JAX CUDA is enabled automatically when running on Linux with jax[cuda12].
+
 Run from examples/warplabs_fluids/:
   python benchmarks/compare_sod.py
 """
 
-import sys, time, statistics
+import sys, time, statistics, contextlib
 from pathlib import Path
 
 import numpy as np
@@ -37,18 +39,13 @@ N_WARM  = 3      # warmup runs
 
 # ─────────────────────────--helpers ─────────────────────────────────────────
 
-def _run_solver(solver, Q0, n_warm, n_bench):
-    """
-    Returns (Q_final, n_steps, median_seconds, throughput_Mcellps).
-    Warmup runs trigger JIT / kernel compilation.
-    """
-    # Warmup
+def _run_warp(solver, Q0, n_warm, n_bench):
+    """Benchmark a WarpEuler1D solver."""
     for _ in range(n_warm):
         solver.initialize(Q0)
         n_steps = solver.run(T_END, CFL)
     wp.synchronize()
 
-    # Timed runs
     times = []
     for _ in range(n_bench):
         solver.initialize(Q0)
@@ -62,53 +59,91 @@ def _run_solver(solver, Q0, n_warm, n_bench):
     return solver.state, n_steps, med, throughput
 
 
-def _run_jax(solver, Q0, n_warm, n_bench):
+def _run_jax(solver, Q0, n_warm, n_bench, jax_device=None):
+    """Benchmark a JaxEuler1D solver on a given JAX device (None = default)."""
     import jax
-    for _ in range(n_warm):
-        solver.initialize(Q0)
-        n_steps = solver.run(T_END, CFL)
-    jax.block_until_ready(solver._Q)
 
-    times = []
-    for _ in range(n_bench):
-        solver.initialize(Q0)
-        t0      = time.perf_counter()
-        n_steps = solver.run(T_END, CFL)
+    ctx = jax.default_device(jax_device) if jax_device else contextlib.nullcontext()
+
+    with ctx:
+        for _ in range(n_warm):
+            solver.initialize(Q0)
+            n_steps = solver.run(T_END, CFL)
         jax.block_until_ready(solver._Q)
-        times.append(time.perf_counter() - t0)
+
+        times = []
+        for _ in range(n_bench):
+            solver.initialize(Q0)
+            t0      = time.perf_counter()
+            n_steps = solver.run(T_END, CFL)
+            jax.block_until_ready(solver._Q)
+            times.append(time.perf_counter() - t0)
 
     med = statistics.median(times)
     throughput = N * n_steps / med / 1e6
     return solver.state, n_steps, med, throughput
 
 
+def _jax_gpu_device():
+    try:
+        import jax
+        gpus = jax.devices('gpu')
+        return gpus[0] if gpus else None
+    except Exception:
+        return None
+
+
 # ─────────────────────────--run all solvers ─────────────────────────────────
 
 def main():
+    import jax
+
     wp.init()
     Q0, x = sod_ic(N, GAMMA)
 
+    jax_gpu = _jax_gpu_device()
+    n_solvers = 3 + (1 if jax_gpu else 0)
+
+    if jax_gpu:
+        print(f"[info] JAX GPU detected: {jax_gpu} — running {n_solvers}-backend comparison")
+    else:
+        print(f"[info] No JAX GPU — running {n_solvers}-backend comparison")
+
     results = {}
+    step = 0
 
     # --- JAX CPU ---
-    print(f"[1/3] JAX CPU   (N={N}, warmup={N_WARM}, bench={N_BENCH}) ...", flush=True)
+    step += 1
+    print(f"\n[{step}/{n_solvers}] JAX CPU   (N={N}, warmup={N_WARM}, bench={N_BENCH}) ...", flush=True)
+    cpu_dev = jax.devices('cpu')[0]
     jax_solver = JaxEuler1D(N, DX, gamma=GAMMA, bc="outflow")
-    Q_jax, n_jax, t_jax, tp_jax = _run_jax(jax_solver, Q0, N_WARM, N_BENCH)
+    Q_jax, n_jax, t_jax, tp_jax = _run_jax(jax_solver, Q0, N_WARM, N_BENCH, jax_device=cpu_dev)
     results["JAX CPU"] = dict(Q=Q_jax, n=n_jax, t=t_jax, tp=tp_jax, color="#e07b00", ls="--")
     print(f"   {n_jax} steps  {t_jax*1000:.1f} ms median  {tp_jax:.2f} Mcell/s")
 
+    # --- JAX CUDA (Linux + jax[cuda12] only) ---
+    if jax_gpu:
+        step += 1
+        print(f"\n[{step}/{n_solvers}] JAX CUDA  (N={N}) ...", flush=True)
+        jax_solver_gpu = JaxEuler1D(N, DX, gamma=GAMMA, bc="outflow")
+        Q_jg, n_jg, t_jg, tp_jg = _run_jax(jax_solver_gpu, Q0, N_WARM, N_BENCH, jax_device=jax_gpu)
+        results["JAX CUDA"] = dict(Q=Q_jg, n=n_jg, t=t_jg, tp=tp_jg, color="#d55e00", ls="--")
+        print(f"   {n_jg} steps  {t_jg*1000:.1f} ms median  {tp_jg:.2f} Mcell/s")
+
     # --- Warp CPU ---
-    print(f"[2/3] Warp CPU  (N={N}) ...", flush=True)
+    step += 1
+    print(f"\n[{step}/{n_solvers}] Warp CPU  (N={N}) ...", flush=True)
     wcpu = WarpEuler1D(N, DX, gamma=GAMMA, bc="outflow", device="cpu")
-    Q_wcpu, n_wcpu, t_wcpu, tp_wcpu = _run_solver(wcpu, Q0, N_WARM, N_BENCH)
+    Q_wcpu, n_wcpu, t_wcpu, tp_wcpu = _run_warp(wcpu, Q0, N_WARM, N_BENCH)
     results["Warp CPU"] = dict(Q=Q_wcpu, n=n_wcpu, t=t_wcpu, tp=tp_wcpu, color="#0072b2", ls="-")
     print(f"   {n_wcpu} steps  {t_wcpu*1000:.1f} ms median  {tp_wcpu:.2f} Mcell/s")
 
     # --- Warp CUDA ---
-    print(f"[3/3] Warp CUDA (N={N}) ...", flush=True)
+    step += 1
+    print(f"\n[{step}/{n_solvers}] Warp CUDA (N={N}) ...", flush=True)
     try:
         wcuda = WarpEuler1D(N, DX, gamma=GAMMA, bc="outflow", device="cuda")
-        Q_wcuda, n_wcuda, t_wcuda, tp_wcuda = _run_solver(wcuda, Q0, N_WARM, N_BENCH)
+        Q_wcuda, n_wcuda, t_wcuda, tp_wcuda = _run_warp(wcuda, Q0, N_WARM, N_BENCH)
         results["Warp CUDA"] = dict(Q=Q_wcuda, n=n_wcuda, t=t_wcuda, tp=tp_wcuda, color="#009e73", ls="-")
         print(f"   {n_wcuda} steps  {t_wcuda*1000:.1f} ms median  {tp_wcuda:.2f} Mcell/s")
     except Exception as e:
@@ -167,9 +202,8 @@ def main():
     fig.savefig(out_profiles, dpi=150, bbox_inches="tight")
     print(f"\nSaved -> {out_profiles}")
 
-    # ─────────────────────────--plot: benchmark ─────────────────────────────
-
-    fig2, ax2 = plt.subplots(figsize=(6, 4))
+    # benchmark bar chart
+    fig2, ax2 = plt.subplots(figsize=(7, 4))
     names  = list(results.keys())
     tps    = [results[n]["tp"] for n in names]
     colors = [results[n]["color"] for n in names]

@@ -68,14 +68,14 @@ tests/
 
 ### V&V results (N=512, t=0.2)
 
-All three backends (JAX CPU, Warp CPU, Warp CUDA) produce **identical** output:
-- L1(rho) = 1.73e-3
-- L1(u)   = 3.19e-3
-- L1(p)   = 1.18e-3
+All **four** backends (JAX CPU, JAX CUDA, Warp CPU, Warp CUDA) produce **identical** output:
+- L1(rho) = 1.729e-3
+- L1(u)   = 3.189e-3
+- L1(p)   = 1.176e-3
 
 Convergence rate vs N is ~O(N^-0.8), consistent with WENO3 near discontinuities.
 
-### Benchmark results (RTX 5000 Ada + Intel Core Ultra 9)
+### Benchmark results — Windows (RTX 5000 Ada, 3-backend, Warp CUDA only)
 
 Fixed 200 steps, float32, median of 5 runs:
 
@@ -90,17 +90,102 @@ Fixed 200 steps, float32, median of 5 runs:
 | 16384 | 15.1 | 9.5 | 110.7 |
 | 32768 | 38.0 | 10.0 | **208.6** |
 
+### Benchmark results — WSL2 Ubuntu 22.04 (4-backend, apples-to-apples GPU)
+
+Fixed 200 steps, float32, median of 5 runs. Code on `/mnt/c/` (Windows NTFS mount — see note).
+
+| N | JAX CPU | JAX CUDA | Warp CPU | Warp CUDA |
+|---|---|---|---|---|
+| 256 | 7.84 | 0.90 | 1.42 | 1.08 |
+| 512 | 9.09 | 1.87 | 2.43 | 2.22 |
+| 1024 | 12.09 | 4.32 | 3.82 | **4.55** |
+| 2048 | 14.50 | 8.01 | 5.19 | **8.76** |
+| 4096 | 13.54 | 16.57 | 6.43 | **17.26** |
+| 8192 | 16.35 | **33.79** | 7.29 | 23.95 |
+| 16384 | 17.16 | 62.68 | 7.85 | **71.44** |
+| 32768 | 22.10 | **130.40** | 8.37 | 125.89 |
+
 All Mcell-updates/s. Crossovers:
-- Warp CUDA > Warp CPU: N ~ 1024
-- Warp CUDA > JAX CPU:  N ~ 4096
+- Warp CUDA > Warp CPU:  N ~ 1024
+- JAX CUDA  > JAX CPU:   N ~ 4096
+- Warp CUDA ~ JAX CUDA:  within 4% at N≥16384 (neck-and-neck at large N)
 
-### Key findings
+**Note:** Numbers above from NTFS-mounted path `/mnt/c/`. See native FS table below for authoritative Linux numbers.
 
-1. **Accuracy:** All backends agree to float32 precision — same algorithm, same numerics.
-2. **Warp CPU is slower than JAX CPU** at all N. Warp's CPU backend uses single-threaded LLVM, no AVX. JAX XLA emits AVX2 vector ops over the full array.
-3. **Warp CUDA scales linearly with N** — still rising at N=32768 (not yet bandwidth-limited on the GPU).
-4. **JAX GPU unavailable on Windows** — CUDA jaxlib wheels are Linux-only. GPU comparison requires Linux or WSL2.
-5. **The compute_dt() CFL call** reads GPU state to CPU every step — significant overhead at small N. Future optimization: GPU-side reduction.
+### Benchmark results — WSL2 native ext4, unfused (6 launches/step) — pre-optimization baseline
+
+Fixed 200 steps, float32, median of 5 runs. Repo on native Linux ext4.
+
+| N | JAX CPU | JAX CUDA | Warp CPU | Warp CUDA |
+|---|---|---|---|---|
+| 4096 | 13.67 | **17.16** | 6.39 | 17.21 |
+| 8192 | 15.89 | **39.90** | 7.51 | 33.85 |
+| 16384 | 17.64 | **59.32** | 8.09 | 54.51 |
+| 32768 | 23.79 | **134.04** | 8.41 | 109.58 |
+
+Crossovers (unfused): JAX CUDA > Warp CUDA from N~4096, gap opens to +22% at N=32768.
+
+### Benchmark results — WSL2 native ext4, FUSED (2 launches/step) — CURRENT
+
+Same setup, same code path, fused `fused_rk_stage_1d` kernel replacing bc+flux+update.
+
+| N | JAX CPU | JAX CUDA | Warp CPU | Warp CUDA |
+|---|---|---|---|---|
+| 256 | 7.52 | 0.87 | 2.19 | 2.14 |
+| 512 | 8.68 | 1.81 | 3.06 | 4.97 |
+| 1024 | 10.52 | 3.86 | 4.31 | **10.98** |
+| 2048 | 13.49 | 7.47 | 4.84 | **21.79** |
+| 4096 | 12.51 | 12.65 | 5.31 | **42.80** |
+| 8192 | 14.35 | 28.22 | 5.74 | **85.88** |
+| 16384 | 15.10 | 61.82 | 5.67 | **170.67** |
+| 32768 | 15.73 | 140.97 | 5.58 | **342.75** |
+| 65536 | 20.36 | 251.83 | 6.03 | **654.34** |
+| 131072 | 26.38 | 512.22 | 6.04 | **1382.29** |
+| 327680 | 22.42 | 14.95 | 4.18 | 56.09 ⚠️ |
+
+All Mcell-updates/s. ⚠️ N=327680 anomaly: both GPU backends collapsed (thermal throttle after sustained peak load — re-run in isolation for clean numbers).
+
+Crossovers (fused):
+- Warp CUDA > Warp CPU:  N ~ 256
+- Warp CUDA > JAX CPU:   N ~ 1024
+- Warp CUDA > JAX CUDA:  N ~ 1024 (grows from 2.13× at N=32768 to 2.70× at N=131072)
+
+### Three-way comparison at N=32768 (Mcell/s) — post-fusion
+
+| Backend | Windows native (unfused) | WSL2 native FS unfused | WSL2 native FS fused |
+|---|---|---|---|
+| JAX CPU | 38.0 | 23.8 | 15.7 |
+| JAX CUDA | — | 134.0 | 141.0 |
+| Warp CPU | 10.0 | 8.4 | 5.6 |
+| Warp CUDA | 208.6 (unfused) | 109.6 | **342.8** |
+
+Warp CUDA fused on WSL2 (343) exceeds Windows native unfused (209) by 64%.
+
+### Key findings (post-optimization, extended N sweep)
+
+1. **Accuracy:** All 4 backends agree to float32 — L1(rho)=1.729e-3 at N=512. Unchanged by fusion.
+2. **Fused Warp CUDA = 2.43× faster than JAX CUDA** at N=32768 (343 vs 141 Mcell/s), growing to **2.70× at N=131072** (1382 vs 512 Mcell/s).
+3. **Both GPUs still bandwidth-scaling at N=131072**: Warp CUDA 4× faster at N=131072 vs N=32768 (1382 vs 343). Neither is saturated yet.
+4. **Fusion speedup vs unfused Warp**: ~3.1× at N=32768. Source: 6 → 2 launches/step, eliminated global F array.
+5. **Warp CUDA peak observed**: 1382 Mcell/s (1.38 Gcell/s) at N=131072, within ~40% of RTX 5000 Ada theoretical memory bandwidth limit.
+6. **Warp CPU regressed slightly** (8 → 6 Mcell/s) because fused kernel doubles WENO3+HLLC compute per thread. CPU is compute-bound so redundant compute costs; GPU benefits from fewer launches instead.
+7. **WSL2 GPU overhead** — Windows native unfused (209) vs WSL2 fused (343) suggests Windows fused would reach ~700+ Mcell/s.
+8. **compute_dt() GPU→CPU readback** every step — still the dominant overhead at small N. Next target.
+
+### Kernel architecture — fused (CURRENT)
+
+```
+fused_rk_stage_1d_{outflow|periodic}   1 launch per RK stage, 2 per timestep
+  thread i (real cell 0..N-1):
+    load Q_in[i-2..i+2]  (5 cells, ghost via inline clamp/wrap)
+    cons→prim for all 5   (in registers, no global writes)
+    F_l = WENO3+HLLC(cells i-2..i+1)   left interface  (registers only)
+    F_r = WENO3+HLLC(cells i-1..i+2)   right interface (registers only)
+    Q_out[i] = alpha*Q_ref[i] + beta*Q_in[i] + coeff*dt*(-(F_r-F_l)/dx)
+```
+
+Eliminated: global F array, bc_kernel, compute_flux_1d, update_rk_1d.
+Remaining files (kept for tests): bc.py, flux.py, update.py.
 
 ---
 

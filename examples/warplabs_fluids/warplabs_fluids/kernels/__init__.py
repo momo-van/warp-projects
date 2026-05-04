@@ -4,3 +4,4 @@ from .riemann import hllc_flux_1d
 from .bc import bc_outflow_1d, bc_periodic_1d
 from .flux import compute_flux_1d
 from .update import update_rk_1d
+from .fused_step import fused_rk_stage_1d_outflow, fused_rk_stage_1d_periodic

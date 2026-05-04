@@ -1,0 +1,13 @@
+# warplabs-fluids — Linux / WSL2 requirements
+# On Windows use: pip install warp-lang numpy scipy matplotlib jax
+# (JAX CUDA wheels are Linux-only; Windows gets CPU-only jax)
+
+warp-lang>=1.12.1
+numpy
+scipy
+matplotlib
+pytest
+
+# JAX with CUDA 12 bundled — Linux only
+# Self-contained: ships libcudart, libcublas, etc. inside jaxlib
+jax[cuda12]>=0.4.26

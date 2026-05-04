@@ -1,2 +1,3 @@
-# Keep benchmark output plots in version control
+# Keep benchmark output plots and animations in version control
 !*.png
+!*.gif
