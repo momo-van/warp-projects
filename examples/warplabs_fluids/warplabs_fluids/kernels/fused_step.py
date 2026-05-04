@@ -1,6 +1,6 @@
 import warp as wp
 
-from .reconstruct import weno3_left, weno3_right
+from .reconstruct import weno3_left, weno3_right, weno5z_left, weno5z_right
 from .riemann import hllc_flux_1d
 
 # Fused bc+WENO3+HLLC+RK-stage kernel — 1 launch per RK stage (2 per step).
@@ -120,3 +120,145 @@ def fused_rk_stage_1d_periodic(
     Q_out[0, i0] = alpha * Q_ref[0, i0] + beta * rho_c_c  + coeff * dt * (-(F_r[0] - F_l[0]) * inv_dx)
     Q_out[1, i0] = alpha * Q_ref[1, i0] + beta * rhou_c   + coeff * dt * (-(F_r[1] - F_l[1]) * inv_dx)
     Q_out[2, i0] = alpha * Q_ref[2, i0] + beta * E_c      + coeff * dt * (-(F_r[2] - F_l[2]) * inv_dx)
+
+
+# ── WENO5-Z + SSP-RK3 fused kernels ───────────────────────────────────────────
+# 7-cell stencil (i-3..i+3), ng=3.
+# SSP-RK3 coefficients (Shu-Osher 1988):
+#   Stage 1: alpha=1,   beta=0,   coeff=1     Q1 = Q0 + dt*L(Q0)
+#   Stage 2: alpha=3/4, beta=1/4, coeff=1/4   Q2 = 3/4*Q0 + 1/4*Q1 + 1/4*dt*L(Q1)
+#   Stage 3: alpha=1/3, beta=2/3, coeff=2/3   Q3 = 1/3*Q0 + 2/3*Q2 + 2/3*dt*L(Q2)
+
+
+@wp.func
+def _flux_at_interface_w5z(
+    rho_a: float, u_a: float, p_a: float,
+    rho_b: float, u_b: float, p_b: float,
+    rho_c: float, u_c: float, p_c: float,
+    rho_d: float, u_d: float, p_d: float,
+    rho_e: float, u_e: float, p_e: float,
+    rho_f: float, u_f: float, p_f: float,
+    gamma: float,
+) -> wp.vec3f:
+    """
+    HLLC flux at interface c+1/2 from 6-cell stencil (a, b, c, d, e, f).
+      Q_L = weno5z_left (a, b, c, d, e)   left-biased  reconstruction at c+1/2
+      Q_R = weno5z_right(b, c, d, e, f)   right-biased reconstruction at c+1/2
+    """
+    rho_L = weno5z_left(rho_a, rho_b, rho_c, rho_d, rho_e)
+    u_L   = weno5z_left(u_a,   u_b,   u_c,   u_d,   u_e)
+    p_L   = weno5z_left(p_a,   p_b,   p_c,   p_d,   p_e)
+    rho_R = weno5z_right(rho_b, rho_c, rho_d, rho_e, rho_f)
+    u_R   = weno5z_right(u_b,   u_c,   u_d,   u_e,   u_f)
+    p_R   = weno5z_right(p_b,   p_c,   p_d,   p_e,   p_f)
+    E_L   = p_L / (gamma - 1.0) + 0.5 * rho_L * u_L * u_L
+    E_R   = p_R / (gamma - 1.0) + 0.5 * rho_R * u_R * u_R
+    return hllc_flux_1d(rho_L, u_L, p_L, E_L, rho_R, u_R, p_R, E_R, gamma)
+
+
+@wp.kernel
+def fused_rk_stage_1d_outflow_w5z(
+    Q_in:  wp.array2d(dtype=float),   # (3, N+2*ng), ng=3
+    Q_ref: wp.array2d(dtype=float),
+    Q_out: wp.array2d(dtype=float),
+    ng: int, N: int, gamma: float,
+    dt: float, dx: float,
+    alpha: float, beta: float, coeff: float,
+):
+    i  = wp.tid()   # real-cell index, 0 .. N-1
+    i0 = ng + i
+
+    # 7-cell stencil clamped to real domain (outflow BC)
+    im3 = wp.clamp(i0 - 3, ng, ng + N - 1)
+    im2 = wp.clamp(i0 - 2, ng, ng + N - 1)
+    im1 = wp.clamp(i0 - 1, ng, ng + N - 1)
+    ip1 = wp.clamp(i0 + 1, ng, ng + N - 1)
+    ip2 = wp.clamp(i0 + 2, ng, ng + N - 1)
+    ip3 = wp.clamp(i0 + 3, ng, ng + N - 1)
+
+    # Load conserved → primitives for all 7 cells (registers only)
+    rho_m3 = Q_in[0, im3]; u_m3 = Q_in[1, im3] / rho_m3; p_m3 = (gamma - 1.0) * (Q_in[2, im3] - 0.5 * rho_m3 * u_m3 * u_m3)
+    rho_m2 = Q_in[0, im2]; u_m2 = Q_in[1, im2] / rho_m2; p_m2 = (gamma - 1.0) * (Q_in[2, im2] - 0.5 * rho_m2 * u_m2 * u_m2)
+    rho_m1 = Q_in[0, im1]; u_m1 = Q_in[1, im1] / rho_m1; p_m1 = (gamma - 1.0) * (Q_in[2, im1] - 0.5 * rho_m1 * u_m1 * u_m1)
+    rho_c  = Q_in[0, i0];  rhou_c = Q_in[1, i0]; E_c = Q_in[2, i0]
+    u_c  = rhou_c / rho_c;  p_c = (gamma - 1.0) * (E_c - 0.5 * rho_c * u_c * u_c)
+    rho_p1 = Q_in[0, ip1]; u_p1 = Q_in[1, ip1] / rho_p1; p_p1 = (gamma - 1.0) * (Q_in[2, ip1] - 0.5 * rho_p1 * u_p1 * u_p1)
+    rho_p2 = Q_in[0, ip2]; u_p2 = Q_in[1, ip2] / rho_p2; p_p2 = (gamma - 1.0) * (Q_in[2, ip2] - 0.5 * rho_p2 * u_p2 * u_p2)
+    rho_p3 = Q_in[0, ip3]; u_p3 = Q_in[1, ip3] / rho_p3; p_p3 = (gamma - 1.0) * (Q_in[2, ip3] - 0.5 * rho_p3 * u_p3 * u_p3)
+
+    # F_l at i-1/2: stencil (i-3, i-2, i-1, i, i+1, i+2)
+    F_l = _flux_at_interface_w5z(
+        rho_m3, u_m3, p_m3,
+        rho_m2, u_m2, p_m2,
+        rho_m1, u_m1, p_m1,
+        rho_c,  u_c,  p_c,
+        rho_p1, u_p1, p_p1,
+        rho_p2, u_p2, p_p2,
+        gamma)
+
+    # F_r at i+1/2: stencil (i-2, i-1, i, i+1, i+2, i+3)
+    F_r = _flux_at_interface_w5z(
+        rho_m2, u_m2, p_m2,
+        rho_m1, u_m1, p_m1,
+        rho_c,  u_c,  p_c,
+        rho_p1, u_p1, p_p1,
+        rho_p2, u_p2, p_p2,
+        rho_p3, u_p3, p_p3,
+        gamma)
+
+    inv_dx = 1.0 / dx
+    Q_out[0, i0] = alpha * Q_ref[0, i0] + beta * rho_c  + coeff * dt * (-(F_r[0] - F_l[0]) * inv_dx)
+    Q_out[1, i0] = alpha * Q_ref[1, i0] + beta * rhou_c + coeff * dt * (-(F_r[1] - F_l[1]) * inv_dx)
+    Q_out[2, i0] = alpha * Q_ref[2, i0] + beta * E_c    + coeff * dt * (-(F_r[2] - F_l[2]) * inv_dx)
+
+
+@wp.kernel
+def fused_rk_stage_1d_periodic_w5z(
+    Q_in:  wp.array2d(dtype=float),
+    Q_ref: wp.array2d(dtype=float),
+    Q_out: wp.array2d(dtype=float),
+    ng: int, N: int, gamma: float,
+    dt: float, dx: float,
+    alpha: float, beta: float, coeff: float,
+):
+    i  = wp.tid()
+    i0 = ng + i
+
+    im3 = ng + (i - 3 + N) % N
+    im2 = ng + (i - 2 + N) % N
+    im1 = ng + (i - 1 + N) % N
+    ip1 = ng + (i + 1) % N
+    ip2 = ng + (i + 2) % N
+    ip3 = ng + (i + 3) % N
+
+    rho_m3 = Q_in[0, im3]; u_m3 = Q_in[1, im3] / rho_m3; p_m3 = (gamma - 1.0) * (Q_in[2, im3] - 0.5 * rho_m3 * u_m3 * u_m3)
+    rho_m2 = Q_in[0, im2]; u_m2 = Q_in[1, im2] / rho_m2; p_m2 = (gamma - 1.0) * (Q_in[2, im2] - 0.5 * rho_m2 * u_m2 * u_m2)
+    rho_m1 = Q_in[0, im1]; u_m1 = Q_in[1, im1] / rho_m1; p_m1 = (gamma - 1.0) * (Q_in[2, im1] - 0.5 * rho_m1 * u_m1 * u_m1)
+    rho_c  = Q_in[0, i0];  rhou_c = Q_in[1, i0]; E_c = Q_in[2, i0]
+    u_c  = rhou_c / rho_c;  p_c = (gamma - 1.0) * (E_c - 0.5 * rho_c * u_c * u_c)
+    rho_p1 = Q_in[0, ip1]; u_p1 = Q_in[1, ip1] / rho_p1; p_p1 = (gamma - 1.0) * (Q_in[2, ip1] - 0.5 * rho_p1 * u_p1 * u_p1)
+    rho_p2 = Q_in[0, ip2]; u_p2 = Q_in[1, ip2] / rho_p2; p_p2 = (gamma - 1.0) * (Q_in[2, ip2] - 0.5 * rho_p2 * u_p2 * u_p2)
+    rho_p3 = Q_in[0, ip3]; u_p3 = Q_in[1, ip3] / rho_p3; p_p3 = (gamma - 1.0) * (Q_in[2, ip3] - 0.5 * rho_p3 * u_p3 * u_p3)
+
+    F_l = _flux_at_interface_w5z(
+        rho_m3, u_m3, p_m3,
+        rho_m2, u_m2, p_m2,
+        rho_m1, u_m1, p_m1,
+        rho_c,  u_c,  p_c,
+        rho_p1, u_p1, p_p1,
+        rho_p2, u_p2, p_p2,
+        gamma)
+
+    F_r = _flux_at_interface_w5z(
+        rho_m2, u_m2, p_m2,
+        rho_m1, u_m1, p_m1,
+        rho_c,  u_c,  p_c,
+        rho_p1, u_p1, p_p1,
+        rho_p2, u_p2, p_p2,
+        rho_p3, u_p3, p_p3,
+        gamma)
+
+    inv_dx = 1.0 / dx
+    Q_out[0, i0] = alpha * Q_ref[0, i0] + beta * rho_c  + coeff * dt * (-(F_r[0] - F_l[0]) * inv_dx)
+    Q_out[1, i0] = alpha * Q_ref[1, i0] + beta * rhou_c + coeff * dt * (-(F_r[1] - F_l[1]) * inv_dx)
+    Q_out[2, i0] = alpha * Q_ref[2, i0] + beta * E_c    + coeff * dt * (-(F_r[2] - F_l[2]) * inv_dx)

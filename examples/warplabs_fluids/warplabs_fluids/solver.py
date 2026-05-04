@@ -1,28 +1,40 @@
 import numpy as np
 import warp as wp
 
-from .kernels import fused_rk_stage_1d_outflow, fused_rk_stage_1d_periodic
+from .kernels import (
+    fused_rk_stage_1d_outflow,
+    fused_rk_stage_1d_periodic,
+    fused_rk_stage_1d_outflow_w5z,
+    fused_rk_stage_1d_periodic_w5z,
+)
 
 _FUSED_KERNELS = {
     "outflow":  fused_rk_stage_1d_outflow,
     "periodic": fused_rk_stage_1d_periodic,
 }
 
+_FUSED_KERNELS_W5Z = {
+    "outflow":  fused_rk_stage_1d_outflow_w5z,
+    "periodic": fused_rk_stage_1d_periodic_w5z,
+}
+
 NVARS_1D = 3   # [rho, rho*u, E]
-NG = 2         # ghost cells required by WENO3
+
+_SCHEME_NG = {
+    "weno3-rk2":  2,
+    "weno5z-rk3": 3,
+}
 
 
 class WarpEuler1D:
     """
     1-D compressible Euler solver on a uniform Cartesian grid.
 
-    Scheme: WENO3 reconstruction (primitive variables) + HLLC Riemann solver + SSP-RK2.
-    Ghost cells (ng=2) are embedded in the state array; real cells live at [ng : ng+N].
+    Two schemes available:
+      "weno3-rk2"  — WENO3 + HLLC + SSP-RK2, ng=2 (default, legacy)
+      "weno5z-rk3" — WENO5-Z + HLLC + SSP-RK3, ng=3 (matches JaxFluids accuracy)
 
-    Kernel architecture (fused):
-      step() fires 2 kernel launches per timestep (1 per RK stage).
-      Each launch fuses: BC handling (inline) + WENO3 + HLLC + RK update.
-      No intermediate global flux array — all interface fluxes live in registers.
+    Ghost cells are embedded in the state array; real cells live at [ng : ng+N].
 
     Parameters
     ----------
@@ -31,6 +43,7 @@ class WarpEuler1D:
     gamma  : ratio of specific heats (default 1.4)
     bc     : boundary condition — "outflow" or "periodic"
     device : Warp device string ("cuda" or "cpu")
+    scheme : "weno3-rk2" or "weno5z-rk3"
     """
 
     def __init__(
@@ -40,25 +53,30 @@ class WarpEuler1D:
         gamma: float = 1.4,
         bc: str = "outflow",
         device: str = "cuda",
+        scheme: str = "weno3-rk2",
     ):
         if bc not in _FUSED_KERNELS:
             raise ValueError(f"bc must be one of {list(_FUSED_KERNELS)}, got {bc!r}")
+        if scheme not in _SCHEME_NG:
+            raise ValueError(f"scheme must be one of {list(_SCHEME_NG)}, got {scheme!r}")
 
         self.N      = N
         self.dx     = float(dx)
         self.gamma  = float(gamma)
         self.bc     = bc
         self.device = device
-        self._ng    = NG
-        self._N_ext = N + 2 * NG
+        self.scheme = scheme
+        self._ng    = _SCHEME_NG[scheme]
+        self._N_ext = N + 2 * self._ng
         self._t     = 0.0
 
         wp.init()
 
         shape = (NVARS_1D, self._N_ext)
-        self._Q       = wp.zeros(shape, dtype=float, device=device)
-        self._Q_stage = wp.zeros(shape, dtype=float, device=device)
-        # Note: no _F array — fluxes are computed in registers inside the fused kernel
+        self._Q        = wp.zeros(shape, dtype=float, device=device)
+        self._Q_stage  = wp.zeros(shape, dtype=float, device=device)
+        if scheme == "weno5z-rk3":
+            self._Q_stage2 = wp.zeros(shape, dtype=float, device=device)
 
     # ------------------------------------------------------------------
     # Public API
@@ -66,30 +84,27 @@ class WarpEuler1D:
 
     def initialize(self, Q0: np.ndarray) -> None:
         """Set initial condition from a (3, N) numpy array of conserved variables."""
+        ng = self._ng
         assert Q0.shape == (NVARS_1D, self.N), \
             f"Expected shape ({NVARS_1D}, {self.N}), got {Q0.shape}"
 
         Q_ext = np.zeros((NVARS_1D, self._N_ext), dtype=np.float32)
-        Q_ext[:, NG : NG + self.N] = Q0.astype(np.float32)
+        Q_ext[:, ng : ng + self.N] = Q0.astype(np.float32)
         self._Q = wp.from_numpy(Q_ext, dtype=float, device=self.device)
         self._t = 0.0
-        # Ghost cells are not pre-filled — the fused kernel handles BC inline.
 
     def step(self, dt: float) -> None:
-        """Advance by one SSP-RK2 timestep (2 kernel launches)."""
-        # Stage 1: Q_stage = Q + dt * L(Q)
-        self._fused_stage(self._Q, self._Q, self._Q_stage, dt, 1.0, 0.0, 1.0)
-
-        # Stage 2: Q = 0.5*Q + 0.5*Q_stage + 0.5*dt*L(Q_stage)
-        # Q_ref = Q (start-of-step), Q_in = Q_stage, Q_out = Q (in-place safe: each thread
-        # reads Q_ref[i] and writes Q_out[i] for the same i, no cross-thread hazard)
-        self._fused_stage(self._Q_stage, self._Q, self._Q, dt, 0.5, 0.5, 0.5)
-
+        """Advance by one timestep (2 launches for RK2, 3 for RK3)."""
+        if self.scheme == "weno5z-rk3":
+            self._step_rk3(dt)
+        else:
+            self._step_rk2(dt)
         self._t += dt
 
     def compute_dt(self, cfl: float = 0.4) -> float:
         """Return the largest stable dt satisfying the CFL condition."""
-        Q = self._Q.numpy()[:, NG : NG + self.N]
+        ng = self._ng
+        Q = self._Q.numpy()[:, ng : ng + self.N]
         rho = Q[0]
         u   = Q[1] / rho
         p   = (self.gamma - 1.0) * (Q[2] - 0.5 * rho * u ** 2)
@@ -108,7 +123,8 @@ class WarpEuler1D:
     @property
     def state(self) -> np.ndarray:
         """Current conserved state as (3, N) numpy float32 array."""
-        return self._Q.numpy()[:, NG : NG + self.N]
+        ng = self._ng
+        return self._Q.numpy()[:, ng : ng + self.N]
 
     @property
     def time(self) -> float:
@@ -118,8 +134,30 @@ class WarpEuler1D:
     # Internal
     # ------------------------------------------------------------------
 
+    def _step_rk2(self, dt: float) -> None:
+        """SSP-RK2: 2 kernel launches."""
+        self._fused_stage(_FUSED_KERNELS[self.bc],
+                          self._Q, self._Q, self._Q_stage, dt, 1.0, 0.0, 1.0)
+        self._fused_stage(_FUSED_KERNELS[self.bc],
+                          self._Q_stage, self._Q, self._Q, dt, 0.5, 0.5, 0.5)
+
+    def _step_rk3(self, dt: float) -> None:
+        """SSP-RK3 (Shu-Osher 1988): 3 kernel launches.
+        Stage 1: Q1   = Q0 + dt*L(Q0)
+        Stage 2: Q2   = 3/4*Q0 + 1/4*Q1 + 1/4*dt*L(Q1)
+        Stage 3: Q_n1 = 1/3*Q0 + 2/3*Q2 + 2/3*dt*L(Q2)
+        """
+        k = _FUSED_KERNELS_W5Z[self.bc]
+        # Stage 1: Q_stage = Q0 + dt*L(Q0)
+        self._fused_stage(k, self._Q, self._Q, self._Q_stage, dt, 1.0, 0.0, 1.0)
+        # Stage 2: Q_stage2 = 3/4*Q0 + 1/4*Q_stage + 1/4*dt*L(Q_stage)
+        self._fused_stage(k, self._Q_stage, self._Q, self._Q_stage2, dt, 0.75, 0.25, 0.25)
+        # Stage 3: Q = 1/3*Q0 + 2/3*Q_stage2 + 2/3*dt*L(Q_stage2)
+        self._fused_stage(k, self._Q_stage2, self._Q, self._Q, dt, 1.0/3.0, 2.0/3.0, 2.0/3.0)
+
     def _fused_stage(
         self,
+        kernel,
         Q_in:   wp.array,
         Q_ref:  wp.array,
         Q_out:  wp.array,
@@ -129,7 +167,7 @@ class WarpEuler1D:
         coeff:  float,
     ) -> None:
         wp.launch(
-            _FUSED_KERNELS[self.bc],
+            kernel,
             dim=self.N,
             inputs=[Q_in, Q_ref, Q_out,
                     self._ng, self.N, self.gamma,

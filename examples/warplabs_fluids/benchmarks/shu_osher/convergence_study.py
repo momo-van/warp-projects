@@ -1,20 +1,21 @@
 """
-Shu-Osher self-convergence study (Warp CUDA).
+Shu-Osher self-convergence study — Warp WENO5-Z+HLLC+RK3 (f32).
 
-No exact solution exists — uses N_ref=4096 as high-resolution reference.
+No exact solution — uses N_ref=4096 as high-resolution reference.
 Block-averages reference to coarser grids, computes L1(rho) vs N.
 
 Test grids: N = 256, 512, 1024, 2048
 Reference:  N = 4096
 
-Saves: shu_osher_convergence.png  (3-panel: density profiles zoomed,
-                                    full density at t=1.8, L1 convergence)
+Saves (to benchmarks/shu_osher/):
+  shu_osher_convergence.png
+  convergence.csv
 
 Run from examples/warplabs_fluids/:
   python benchmarks/shu_osher/convergence_study.py
 """
 
-import sys, gc
+import csv, gc, sys
 from pathlib import Path
 
 import numpy as np
@@ -34,45 +35,32 @@ GRID_SIZES = [256, 512, 1024, 2048]
 N_REF      = 4096
 CFL        = 0.4
 
-COLORS = {
-    256:  "#d55e00",
-    512:  "#e07b00",
-    1024: "#0072b2",
-    2048: "#009e73",
-    4096: "0.3",
-}
-LS = {256: (0,[3,2]), 512: "--", 1024: "-.", 2048: "-", 4096: "-"}
+COLORS = {256: "#d55e00", 512: "#e07b00", 1024: "#0072b2", 2048: "#009e73", 4096: "0.3"}
+LS     = {256: (0, [3, 2]), 512: "--", 1024: "-.", 2048: "-", 4096: "-"}
 
 
 def run(N, device="cuda"):
-    dx = L / N
     Q0, x = shu_ic(N, GAMMA)
-    solver = WarpEuler1D(N, dx, gamma=GAMMA, bc="outflow", device=device)
+    solver = WarpEuler1D(N, L/N, gamma=GAMMA, bc="outflow", device=device, scheme="weno5z-rk3")
     solver.initialize(Q0)
-    n_steps = solver.run(T_END, CFL)
-    if device == "cuda":
-        wp.synchronize()
+    solver.run(T_END, CFL)
+    if device == "cuda": wp.synchronize()
     rho, u, p = cons_to_prim(solver.state, GAMMA)
     del solver; gc.collect()
     return rho, u, p, x
 
 
 def block_avg(arr, factor):
-    """Coarsen arr[N_ref] to arr[N_ref//factor] by averaging."""
     N = len(arr)
     return arr.reshape(N // factor, factor).mean(axis=1)
 
 
 def main():
     wp.init()
-
-    # try CUDA first, fall back to CPU
     try:
-        wp.get_device("cuda")
-        device = "cuda"
+        wp.get_device("cuda"); device = "cuda"
     except Exception:
-        device = "cpu"
-        print("[info] CUDA not available, using CPU")
+        device = "cpu"; print("[info] CUDA not available, using CPU")
 
     print(f"\nRunning reference solution N={N_REF} ...", flush=True)
     rho_ref, u_ref, p_ref, x_ref = run(N_REF, device)
@@ -95,11 +83,18 @@ def main():
     for i, N in enumerate(Ns):
         l1 = coarse[N]["l1"]
         if i > 0:
-            N0 = Ns[i-1]
-            rate = np.log2(coarse[N0]["l1"] / l1) / np.log2(N / N0)
+            rate = np.log2(coarse[Ns[i-1]]["l1"] / l1) / np.log2(N / Ns[i-1])
             print(f"{N:>6}  {l1:>10.3e}  {rate:>8.2f}")
         else:
             print(f"{N:>6}  {l1:>10.3e}  {'--':>8}")
+
+    # ── save CSV ──────────────────────────────────────────────────────────────
+    with open(OUT / "convergence.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["solver", "N", "N_ref", "L1_rho"])
+        for N in Ns:
+            w.writerow(["Warp WENO5-Z (f32)", N, N_REF, coarse[N]["l1"]])
+    print(f"\nSaved -> {OUT/'convergence.csv'}")
 
     # ── figure ────────────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(14, 5))
@@ -108,10 +103,9 @@ def main():
     ax_conv = fig.add_subplot(1, 3, 3)
     fig.suptitle(
         f"Shu-Osher self-convergence  ·  N_ref={N_REF}  ·  t={T_END}\n"
-        "Mach-3 shock + sin density  ·  Warp WENO3-HLLC-RK2 (fused, float32)",
+        "Mach-3 shock + sin density  ·  Warp WENO5-Z+HLLC+RK3 (fused, float32)",
         fontsize=10, fontweight="bold")
 
-    # reference
     ax_full.plot(x_ref, rho_ref, color=COLORS[N_REF], ls="-", lw=0.8,
                  label=f"N={N_REF} (ref)", zorder=5)
     ax_zoom.plot(x_ref, rho_ref, color=COLORS[N_REF], ls="-", lw=0.8,
@@ -119,49 +113,36 @@ def main():
 
     l1_vals = []
     for N in sorted(coarse):
-        d = coarse[N]
-        ls = LS[N]
+        d = coarse[N]; ls = LS[N]
         kw = dict(color=COLORS[N], ls=ls, lw=1.6, label=f"N={N}")
         ax_full.plot(d["x"], d["rho"], **kw)
         ax_zoom.plot(d["x"], d["rho"], **kw)
         l1_vals.append(d["l1"])
 
-    ax_full.set_xlabel("x", fontsize=10)
-    ax_full.set_ylabel("density  ρ", fontsize=10)
+    ax_full.set_xlabel("x", fontsize=10); ax_full.set_ylabel("density  ρ", fontsize=10)
     ax_full.set_title(f"Density at t={T_END}", fontsize=11)
-    ax_full.set_xlim(0, L)
-    ax_full.legend(fontsize=8, loc="upper left")
+    ax_full.set_xlim(0, L); ax_full.legend(fontsize=8, loc="upper left")
     ax_full.grid(True, lw=0.4, alpha=0.5)
 
     ax_zoom.set_xlabel("x", fontsize=10)
     ax_zoom.set_title("Post-shock region  (zoomed)", fontsize=11)
-    ax_zoom.set_xlim(1.5, 6.5)
-    ax_zoom.legend(fontsize=8, loc="upper left")
+    ax_zoom.set_xlim(1.5, 6.5); ax_zoom.legend(fontsize=8, loc="upper left")
     ax_zoom.grid(True, lw=0.4, alpha=0.5)
 
-    # convergence
     Ns_arr = np.array(sorted(coarse))
-    ax_conv.loglog(Ns_arr, l1_vals, "o-", color="#0072b2", lw=1.8, ms=7,
-                   label="L1(rho)")
-    # reference slopes
+    ax_conv.loglog(Ns_arr, l1_vals, "o-", color="#0072b2", lw=1.8, ms=7, label="L1(rho)")
     x0, y0 = Ns_arr[0], l1_vals[0]
-    ax_conv.loglog(Ns_arr, y0 * (Ns_arr / x0) ** (-1.0), color="0.6",
-                   ls="--", lw=1.0, label="O(N⁻¹)")
-    ax_conv.loglog(Ns_arr, y0 * (Ns_arr / x0) ** (-2.0), color="0.8",
-                   ls=":", lw=1.0, label="O(N⁻²)")
-    ax_conv.set_xlabel("N", fontsize=10)
-    ax_conv.set_ylabel("L1(ρ)  vs N_ref=4096", fontsize=10)
+    ax_conv.loglog(Ns_arr, y0 * (Ns_arr / x0)**(-1.0), color="0.6", ls="--", lw=1.0, label="O(N⁻¹)")
+    ax_conv.loglog(Ns_arr, y0 * (Ns_arr / x0)**(-2.0), color="0.8", ls=":",  lw=1.0, label="O(N⁻²)")
+    ax_conv.set_xlabel("N", fontsize=10); ax_conv.set_ylabel("L1(ρ)  vs N_ref=4096", fontsize=10)
     ax_conv.set_title("Self-convergence", fontsize=11)
-    ax_conv.set_xticks(Ns_arr)
-    ax_conv.set_xticklabels([str(n) for n in Ns_arr], fontsize=8)
-    ax_conv.legend(fontsize=9)
-    ax_conv.grid(True, which="both", lw=0.4, alpha=0.5)
+    ax_conv.set_xticks(Ns_arr); ax_conv.set_xticklabels([str(n) for n in Ns_arr], fontsize=8)
+    ax_conv.legend(fontsize=9); ax_conv.grid(True, which="both", lw=0.4, alpha=0.5)
 
     fig.tight_layout()
-    out = OUT / "shu_osher_convergence.png"
-    fig.savefig(out, dpi=150, bbox_inches="tight")
+    fig.savefig(OUT / "shu_osher_convergence.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"\nSaved -> {out}")
+    print(f"Saved -> {OUT/'shu_osher_convergence.png'}")
 
 
 if __name__ == "__main__":
