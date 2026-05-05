@@ -174,31 +174,40 @@ def _plot_comparison(ns, warp_tp, jxf_tp, prec_label, out_path):
 def main():
     wp.init()
 
-    jxf_ok = False; case_tmpl = None; num_path = None; tmp_dir = None
+    jxf_ok = False; case_tmpl = None; num_path_f32 = None; num_path_f64 = None; tmp_dir = None
     try:
         case_tmpl = json.load(open(JXF_EX / "sod.json"))
-        num_setup = json.load(open(JXF_EX / "numerical_setup.json"))
-        # Force fp32 and silence per-step logging for fair/fast benchmarking
-        num_setup.setdefault("precision", {})["is_double_precision_compute"] = False
-        num_setup.setdefault("precision", {})["is_double_precision_output"] = False
-        num_setup.setdefault("output", {}).setdefault("logging", {})["level"] = "NONE"
-        tmp_dir   = Path(tempfile.mkdtemp(prefix="fair_sod_"))
-        num_path  = tmp_dir / "numerical_setup.json"
-        num_path.write_text(json.dumps(num_setup))
+        base_setup = json.load(open(JXF_EX / "numerical_setup.json"))
+        base_setup.setdefault("output", {}).setdefault("logging", {})["level"] = "NONE"
+        tmp_dir = Path(tempfile.mkdtemp(prefix="fair_sod_"))
+
+        ns_f32 = json.loads(json.dumps(base_setup))
+        ns_f32.setdefault("precision", {})["is_double_precision_compute"] = False
+        ns_f32.setdefault("precision", {})["is_double_precision_output"] = False
+        num_path_f32 = tmp_dir / "numerical_setup_f32.json"
+        num_path_f32.write_text(json.dumps(ns_f32))
+
+        ns_f64 = json.loads(json.dumps(base_setup))
+        ns_f64.setdefault("precision", {})["is_double_precision_compute"] = True
+        ns_f64.setdefault("precision", {})["is_double_precision_output"] = True
+        num_path_f64 = tmp_dir / "numerical_setup_f64.json"
+        num_path_f64.write_text(json.dumps(ns_f64))
+
         jxf_ok = True
-        print("[info] JaxFluids templates loaded (fp32, logging=NONE)")
+        print("[info] JaxFluids templates loaded (fp32 + fp64, logging=NONE)")
     except Exception as e:
         print(f"[info] JaxFluids not available ({e}) — Warp-only run")
 
     warp_f32 = []
     warp_f64 = []
-    jxf_both = []   # fp32 == fp64 empirically; measure once
+    jxf_f32  = []
+    jxf_f64  = []
 
-    print(f"\n{'N':>8}  {'Warp f32':>14}  {'Warp f64':>14}  {'JaxFluids':>14}")
-    print("-" * 58)
+    print(f"\n{'N':>8}  {'Warp f32':>12}  {'Warp f64':>12}  {'JxF f32':>12}  {'JxF f64':>12}")
+    print("-" * 66)
 
     for N in GRID_SIZES:
-        tp32 = None; tp64 = None; tpjx = None
+        tp32 = None; tp64 = None; tjx32 = None; tjx64 = None
 
         try:
             tp32 = bench_warp("cuda", N, "weno5z-rk3")
@@ -212,18 +221,19 @@ def main():
 
         if jxf_ok:
             try:
-                tpjx = bench_jaxfluids_once(N, case_tmpl, num_path, tmp_dir)
+                tjx32 = bench_jaxfluids_once(N, case_tmpl, num_path_f32, tmp_dir)
             except Exception as e:
-                print(f"  JaxFluids  N={N}  ERROR: {e}")
+                print(f"  JxF f32  N={N}  ERROR: {e}")
+            try:
+                tjx64 = bench_jaxfluids_once(N, case_tmpl, num_path_f64, tmp_dir)
+            except Exception as e:
+                print(f"  JxF f64  N={N}  ERROR: {e}")
 
-        warp_f32.append(tp32)
-        warp_f64.append(tp64)
-        jxf_both.append(tpjx)
+        warp_f32.append(tp32);  warp_f64.append(tp64)
+        jxf_f32.append(tjx32); jxf_f64.append(tjx64)
 
-        f32s  = f"{tp32:>14.2f}" if tp32  is not None else f"{'--':>14}"
-        f64s  = f"{tp64:>14.2f}" if tp64  is not None else f"{'--':>14}"
-        jxfs  = f"{tpjx:>14.2f}" if tpjx  is not None else f"{'--':>14}"
-        print(f"{N:>8}  {f32s}  {f64s}  {jxfs}", flush=True)
+        def _fmt(v): return f"{v:>12.2f}" if v is not None else f"{'--':>12}"
+        print(f"{N:>8}  {_fmt(tp32)}  {_fmt(tp64)}  {_fmt(tjx32)}  {_fmt(tjx64)}", flush=True)
 
     if tmp_dir:
         import shutil; shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -231,18 +241,19 @@ def main():
     # ── CSV ───────────────────────────────────────────────────────────────────
     with open(OUT / "fair_throughput.csv", "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["N", "warp_f32_Mcells", "warp_f64_Mcells", "jaxfluids_Mcells"])
-        for N, v32, v64, vjx in zip(GRID_SIZES, warp_f32, warp_f64, jxf_both):
+        w.writerow(["N", "warp_f32_Mcells", "warp_f64_Mcells", "jxf_f32_Mcells", "jxf_f64_Mcells"])
+        for N, v32, v64, j32, j64 in zip(GRID_SIZES, warp_f32, warp_f64, jxf_f32, jxf_f64):
             w.writerow([N,
                         f"{v32:.4f}" if v32 is not None else "",
                         f"{v64:.4f}" if v64 is not None else "",
-                        f"{vjx:.4f}" if vjx is not None else ""])
+                        f"{j32:.4f}" if j32 is not None else "",
+                        f"{j64:.4f}" if j64 is not None else ""])
     print(f"\nSaved -> {OUT / 'fair_throughput.csv'}")
 
     # ── plots ─────────────────────────────────────────────────────────────────
-    _plot_comparison(GRID_SIZES, warp_f32, jxf_both, "f32",
+    _plot_comparison(GRID_SIZES, warp_f32, jxf_f32, "f32",
                      OUT / "throughput_fp32.png")
-    _plot_comparison(GRID_SIZES, warp_f64, jxf_both, "f64",
+    _plot_comparison(GRID_SIZES, warp_f64, jxf_f64, "f64",
                      OUT / "throughput_fp64.png")
 
 
