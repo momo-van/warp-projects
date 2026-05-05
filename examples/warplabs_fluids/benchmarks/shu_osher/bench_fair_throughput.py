@@ -15,7 +15,7 @@ Run from examples/warplabs_fluids/ inside the JaxFluids venv on WSL2:
   XLA_PYTHON_CLIENT_PREALLOCATE=false python benchmarks/shu_osher/bench_fair_throughput.py
 """
 
-import csv, gc, json, os, statistics, sys, tempfile, time
+import csv, gc, json, os, statistics, subprocess, sys, tempfile, time
 from pathlib import Path
 
 import numpy as np
@@ -76,38 +76,62 @@ def bench_warp(device, N, scheme):
     return tp
 
 
-def bench_jaxfluids_once(N, case_tmpl, num_path, tmp_dir):
-    """Run JaxFluids (default precision) at N. Returns throughput Mcell/s."""
-    from jaxfluids import InputManager, InitializationManager, SimulationManager
-    import jax
-    run_dir = tmp_dir / f"shu_N{N}"
-    run_dir.mkdir(exist_ok=True)
+_JXF_WORKER = """
+import json, os, shutil, statistics, sys, tempfile, time
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+args = json.loads(sys.argv[1])
+case_tmpl, num_path_s, N, N_BENCH, A_MAX, T_END, L = (
+    args["case_tmpl"], args["num_path"], args["N"],
+    args["N_BENCH"], args["A_MAX"], args["T_END"], args["L"])
+import jax
+from jaxfluids import InputManager, InitializationManager, SimulationManager
+from pathlib import Path
+with tempfile.TemporaryDirectory(prefix=f"jxf_shu_{N}_") as td:
+    td = Path(td)
     case = json.loads(json.dumps(case_tmpl))
     case["domain"]["x"]["cells"] = N
-    case["general"]["save_path"] = str(run_dir)
+    case["general"]["save_path"] = str(td)
     case["general"]["save_dt"]   = 999.0
-    cp = run_dir / "case.json"
-    cp.write_text(json.dumps(case))
-    im  = InputManager(str(cp), str(num_path))
-    ini = InitializationManager(im)
-    sim = SimulationManager(im)
-    buf = ini.initialization()
-    t0w = time.perf_counter()
-    sim.simulate(buf); jax.block_until_ready(buf)
-    if time.perf_counter() - t0w > MAX_WALL_S:
-        return None
+    cp = td / "case.json"; cp.write_text(json.dumps(case))
+    shutil.copy(num_path_s, td / "numerical_setup.json")
+    im  = InputManager(str(cp), str(td / "numerical_setup.json"))
+    ini = InitializationManager(im); sim = SimulationManager(im)
+    buf = ini.initialization(); sim.simulate(buf); jax.block_until_ready(buf)
     times = []
     for _ in range(N_BENCH):
-        buf = ini.initialization()
-        t0  = time.perf_counter()
+        buf = ini.initialization(); t0 = time.perf_counter()
         sim.simulate(buf); jax.block_until_ready(buf)
         times.append(time.perf_counter() - t0)
+try:
+    cfl_jxf = json.load(open(num_path_s))["conservatives"]["time_integration"].get("CFL", 0.5)
+except Exception:
+    cfl_jxf = 0.5
+n_steps = max(1, int(round(T_END / (cfl_jxf * (L / N) / A_MAX))))
+print(json.dumps({"tp": N * n_steps / statistics.median(times) / 1e6}))
+"""
+
+
+def bench_jaxfluids_once(N, case_tmpl, num_path, tmp_dir):
+    """Run JaxFluids in a subprocess with a hard wall-time limit."""
+    args = json.dumps({
+        "case_tmpl": case_tmpl, "num_path": str(num_path),
+        "N": N, "N_BENCH": N_BENCH, "A_MAX": _A_MAX,
+        "T_END": T_END, "L": L,
+    })
+    worker = tmp_dir / "_jxf_worker.py"
+    worker.write_text(_JXF_WORKER)
     try:
-        cfl_jxf = json.load(open(num_path))["conservatives"]["time_integration"].get("CFL", 0.5)
-    except Exception:
-        cfl_jxf = 0.5
-    n_steps = max(1, int(round(T_END / (cfl_jxf * (L / N) / _A_MAX))))
-    return N * n_steps / statistics.median(times) / 1e6
+        r = subprocess.run(
+            [sys.executable, str(worker), args],
+            capture_output=True, text=True,
+            timeout=MAX_WALL_S,
+            env={**os.environ, "XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
+        )
+        if r.returncode != 0:
+            return None
+        return json.loads(r.stdout.strip())["tp"]
+    except (subprocess.TimeoutExpired, Exception):
+        return None
 
 
 def _plot_comparison(ns, warp_tp, jxf_tp, prec_label, out_path):
