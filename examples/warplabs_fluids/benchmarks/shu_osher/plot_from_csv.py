@@ -285,6 +285,60 @@ def plot_throughput_merged(csv_paths, out_path, title):
     print(f"Saved -> {out_path}")
 
 
+PREC_COLORS = {
+    "JaxFluids (WENO5-Z, f32)": "#1a7abd",
+    "JaxFluids (WENO5-Z, f64)": "#e07b00",
+    "Warp WENO5-Z (f32)":       "#009e73",
+}
+PREC_STYLES = {
+    "JaxFluids (WENO5-Z, f32)": ("s", "--"),
+    "JaxFluids (WENO5-Z, f64)": ("D", "-"),
+    "Warp WENO5-Z (f32)":       ("^", "-"),
+}
+
+
+def plot_precision_comparison(csv_path, out_path):
+    rows = read_csv(csv_path)
+    if not rows:
+        print(f"[skip] {csv_path.name} not found"); return
+    cols = list(rows[0].keys())
+    x = np.array([float(r["x"]) for r in rows])
+    fields = ["rho", "u", "p"]
+    field_labels = ["density  rho", "velocity  u", "pressure  p"]
+
+    solvers = {}
+    for col in cols:
+        for fld in fields:
+            if col.startswith(fld + "_"):
+                tag = col[len(fld)+1:]
+                name = (tag.replace("_", " ")
+                           .replace("JaxFluids WENO5-Z f32", "JaxFluids (WENO5-Z, f32)")
+                           .replace("JaxFluids WENO5-Z f64", "JaxFluids (WENO5-Z, f64)")
+                           .replace("Warp WENO5-Z f32", "Warp WENO5-Z (f32)"))
+                solvers[tag] = name
+                break
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
+    fig.suptitle(
+        "Shu-Osher  |  N=512  |  WENO5-Z+HLLC+RK3\n"
+        "Precision comparison: JaxFluids fp32 vs fp64 vs Warp fp32",
+        fontsize=10, fontweight="bold")
+    for ax, fld, flabel in zip(axes, fields, field_labels):
+        for tag, name in solvers.items():
+            col = f"{fld}_{tag}"
+            if col not in cols: continue
+            vals = np.array([float(r[col]) if r[col] else np.nan for r in rows])
+            c = PREC_COLORS.get(name, "#555")
+            m, ls = PREC_STYLES.get(name, ("o", "-"))
+            ax.plot(x, vals, color=c, lw=1.4, ls=ls, label=name, alpha=0.85)
+        ax.set_xlabel("x"); ax.set_title(flabel)
+        ax.set_xlim(0, L)
+        ax.legend(fontsize=7); ax.grid(True, lw=0.4, alpha=0.5)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight"); plt.close(fig)
+    print(f"Saved -> {out_path}")
+
+
 def main():
     theory = lambda N: 3 * 3 * (N + 6) * 4 / (1024 ** 2)
 
@@ -296,6 +350,10 @@ def main():
     plot_profiles(
         OUT / "bench_jaxfluids_profiles_N512.csv",
         OUT / "jaxfluids_profiles.png")
+
+    plot_precision_comparison(
+        OUT / "precision_profiles_N512.csv",
+        OUT / "precision_comparison.png")
 
     # scaling plot: merge Warp N-sweep + JaxFluids head-to-head data
     plot_throughput_merged(
