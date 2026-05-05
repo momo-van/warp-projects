@@ -137,6 +137,41 @@ class WarpEuler1D:
             n += 1
         return n
 
+    def reset_state(self, Q0: np.ndarray) -> None:
+        """Copy Q0 into the existing state buffer in-place (no reallocation).
+
+        Unlike initialize(), this preserves the buffer pointer so any previously
+        captured CUDA graph remains valid.
+        """
+        ng = self._ng
+        np_dtype = np.float64 if self._f64 else np.float32
+        Q_ext = np.zeros((NVARS_1D, self._N_ext), dtype=np_dtype)
+        Q_ext[:, ng : ng + self.N] = Q0.astype(np_dtype)
+        self._Q.assign(Q_ext)
+        self._t = 0.0
+
+    def capture_graph(self, dt: float, n_steps: int) -> "wp.Graph":
+        """Capture n_steps fixed-dt timesteps as a CUDA graph.
+
+        The graph captures only CUDA kernel launches; Python overhead (self._t
+        updates) is not captured and should be handled by the caller.
+
+        The captured graph is tied to the current buffer pointers.  Use
+        reset_state() (not initialize()) to reset between replays.
+        """
+        if self.device == "cpu":
+            raise ValueError("CUDA graph capture requires a CUDA device")
+        wp.load_module(device=self.device)
+        wp.capture_begin(device=self.device)
+        for _ in range(n_steps):
+            if self.scheme == "weno5z-rk3-f64":
+                self._step_rk3_f64(dt)
+            elif self.scheme == "weno5z-rk3":
+                self._step_rk3(dt)
+            else:
+                self._step_rk2(dt)
+        return wp.capture_end(device=self.device)
+
     @property
     def state(self) -> np.ndarray:
         """Current conserved state as (3, N) numpy float32 array."""
