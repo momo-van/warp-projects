@@ -13,7 +13,7 @@ Outputs:
   cuda_graph_benchmark.csv   — all six columns per N
   cuda_graph_scaling.png     — log-log throughput vs N (all six)
 
-Run from projects/warplabs_fluids/ inside the JaxFluids venv on WSL2:
+Run from projects/warpfluids/ inside the JaxFluids venv on WSL2:
   source /root/venv-jf/bin/activate
   XLA_PYTHON_CLIENT_PREALLOCATE=false python benchmarks/shu_osher/bench_cuda_graph.py
 """
@@ -35,7 +35,7 @@ JXF_EX = Path("/root/JAXFLUIDS/examples/examples_1D/05_shock_density_interaction
 
 sys.path.insert(0, str(ROOT))
 
-from warplabs_fluids import WarpEuler1D
+from warpfluids import WarpEuler1D
 from cases.shu_osher import ic as shu_ic, L, T_END, GAMMA, RHO_L, U_L, P_L
 
 GRID_SIZES  = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]

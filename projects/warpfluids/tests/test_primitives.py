@@ -6,7 +6,7 @@ import pytest
 
 warp = pytest.importorskip("warp")
 
-from warplabs_fluids.kernels.primitives import cons_to_prim_1d, prim_to_cons_1d
+from warpfluids.kernels.primitives import cons_to_prim_1d, prim_to_cons_1d
 
 
 # Thin kernel to exercise @wp.func from a test context

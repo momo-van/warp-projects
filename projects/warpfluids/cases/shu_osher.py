@@ -14,7 +14,7 @@ No exact solution — reference is a fine-grid numerical solution.
 """
 
 import numpy as np
-from warplabs_fluids import prim_to_cons
+from warpfluids import prim_to_cons
 
 # Mach-3 shock post-shock state (Rankine-Hugoniot, ambient rho=1, p=1, u=0)
 RHO_L = 3.857143

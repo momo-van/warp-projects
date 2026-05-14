@@ -13,7 +13,7 @@ import pytest
 warp = pytest.importorskip("warp")
 scipy = pytest.importorskip("scipy")
 
-from warplabs_fluids import WarpEuler1D, cons_to_prim, l1_error
+from warpfluids import WarpEuler1D, cons_to_prim, l1_error
 from cases.sod import ic as sod_ic, exact as sod_exact
 
 

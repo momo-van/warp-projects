@@ -13,17 +13,17 @@ Owner: mmohajerani@nvidia.com (NVIDIA)
 ## Purpose
 
 Hands-on exploration of Warp standalone (no Newton). Two goals running in parallel:
-1. Build `warplabs-fluids` — a Warp-native compressible CFD solver validated against JAX reference implementations, with throughput benchmarks demonstrating GPU advantage
+1. Build `warpfluids` — a Warp-native compressible CFD solver validated against JAX reference implementations, with throughput benchmarks demonstrating GPU advantage
 2. Expand to other physics domains over time (FEM, geometry processing, waves, etc.)
 
 It is **not** tied to Newton (that lives in `newton-examples`).
 
 ---
 
-## Active project: warplabs-fluids
+## Active project: warpfluids
 
-`projects/warplabs_fluids/` — 1-D compressible Euler solver, Phase 1 complete.
-See `projects/warplabs_fluids/CLAUDE.md` for full context.
+`projects/warpfluids/` — 1-D compressible Euler solver, Phase 1 complete.
+See `projects/warpfluids/CLAUDE.md` for full context.
 
 **Phase 1 status: COMPLETE**
 - WarpEuler1D: WENO3-HLLC-RK2, 1D, float32
@@ -67,7 +67,7 @@ Core install: `pip install warp-lang numpy scipy jax matplotlib`
 ## Running
 
 ```powershell
-cd projects\warplabs_fluids
+cd projects\warpfluids
 python -m pytest tests/ -v                     # all 15 tests
 python benchmarks\compare_sod.py               # Sod accuracy + throughput
 python benchmarks\scaling_benchmark.py         # N-scaling across all backends

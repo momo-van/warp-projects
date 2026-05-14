@@ -2,7 +2,7 @@
 Warp CUDA graph vs JaxFluids — comparison plots for Sod and Shu-Osher.
 Generates one figure per case: throughput panel + ratio panel.
 
-Run from projects/warplabs_fluids/:
+Run from projects/warpfluids/:
   python benchmarks/plot_warp_vs_jxf.py
 """
 

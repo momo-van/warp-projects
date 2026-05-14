@@ -15,7 +15,7 @@ import pytest
 
 warp = pytest.importorskip("warp")
 
-from warplabs_fluids.kernels.riemann import hllc_flux_1d
+from warpfluids.kernels.riemann import hllc_flux_1d
 
 
 @wp.kernel

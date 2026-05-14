@@ -1,7 +1,7 @@
 """
-Precision comparison — Shu-Osher shock-density interaction.
+Precision comparison — Sod shock tube.
 Runs JaxFluids fp32 and fp64 (in isolated subprocesses) plus Warp fp32.
-All three use WENO5-Z+HLLC+RK3 at N=512.  Profile comparison (no exact solution).
+All three use WENO5-Z+HLLC+RK3 at N=512.  Accuracy vs exact Riemann.
 
 Saves:
   precision_profiles_N512.csv
@@ -9,7 +9,7 @@ Saves:
 
 Run:
   source /root/venv-jf/bin/activate
-  python benchmarks/shu_osher/bench_precision.py
+  python benchmarks/sod/bench_precision.py
 """
 
 import argparse, csv, gc, json, os, subprocess, sys, tempfile
@@ -21,13 +21,13 @@ import matplotlib.pyplot as plt
 
 ROOT   = Path(__file__).parent.parent.parent
 OUT    = Path(__file__).parent
-JXF_EX = Path("/root/JAXFLUIDS/examples/examples_1D/05_shock_density_interaction")
+JXF_EX = Path("/root/JAXFLUIDS/examples/examples_1D/02_sod_shock_tube")
 sys.path.insert(0, str(ROOT))
 
-from cases.shu_osher import ic as shu_ic, L, T_END, GAMMA
-
-N   = 512
-CFL = 0.4
+GAMMA = 1.4
+T_END = 0.2
+CFL   = 0.4
+N     = 512
 
 COLORS = {
     "JaxFluids (WENO5-Z, f32)": "#1a7abd",
@@ -41,7 +41,7 @@ STYLES = {
 }
 
 
-# ── subprocess helper ─────────────────────────────────────────────────────────
+# ── subprocess helper (called internally, not by user) ────────────────────────
 
 def _run_jxf_subprocess(prec, outfile):
     import jax
@@ -49,10 +49,10 @@ def _run_jxf_subprocess(prec, outfile):
     from jaxfluids import InputManager, InitializationManager, SimulationManager
     import glob, h5py
 
-    case_tmpl = json.load(open(JXF_EX / "shock_density_interaction.json"))
+    case_tmpl = json.load(open(JXF_EX / "sod.json"))
     num_setup = json.load(open(JXF_EX / "numerical_setup.json"))
 
-    with tempfile.TemporaryDirectory(prefix=f"prec_shu_{prec}_") as td:
+    with tempfile.TemporaryDirectory(prefix=f"prec_sod_{prec}_") as td:
         td = Path(td)
         case = json.loads(json.dumps(case_tmpl))
         case["domain"]["x"]["cells"] = N
@@ -64,7 +64,7 @@ def _run_jxf_subprocess(prec, outfile):
         buf = InitializationManager(im).initialization()
         SimulationManager(im).simulate(buf)
         jax.block_until_ready(buf)
-        h5s = sorted(glob.glob(str(td / "shock_density_interaction" / "domain" / "data_*.h5")))
+        h5s = sorted(glob.glob(str(td / "sod" / "domain" / "data_*.h5")))
         with h5py.File(max(h5s, key=lambda f: float(Path(f).stem.replace("data_", ""))), "r") as f:
             rho = np.array(f["primitives/density"][0, 0, :])
             u   = np.array(f["primitives/velocity"][0, 0, :, 0])
@@ -100,87 +100,76 @@ def _spawn_jxf(prec):
 def main():
     import warp as wp
     wp.init()
-    from warplabs_fluids import WarpEuler1D, cons_to_prim
+    from warpfluids import WarpEuler1D, cons_to_prim, l1_error
+    from cases.sod import ic as sod_ic, exact as sod_exact
 
-    _, x = shu_ic(N, GAMMA)
+    _, x = sod_ic(N, GAMMA)
+    rho_ex, u_ex, p_ex = sod_exact(T_END, x, GAMMA)
+    dx = 1.0 / N
     res = {}
 
     print("Running JaxFluids fp32 (subprocess)...", flush=True)
     out = _spawn_jxf("f32")
     if out:
         res["JaxFluids (WENO5-Z, f32)"] = out
-        print("  done")
+        print(f"  L1(rho)={l1_error(out[0], rho_ex, dx):.3e}")
 
     print("Running JaxFluids fp64 (subprocess)...", flush=True)
     out = _spawn_jxf("f64")
     if out:
         res["JaxFluids (WENO5-Z, f64)"] = out
-        print("  done")
+        print(f"  L1(rho)={l1_error(out[0], rho_ex, dx):.3e}")
 
     print("Running Warp fp32...", flush=True)
     try:
-        Q0, x = shu_ic(N, GAMMA)
-        solver = WarpEuler1D(N, L/N, gamma=GAMMA, bc="outflow", device="cuda", scheme="weno5z-rk3")
+        Q0, x = sod_ic(N, GAMMA)
+        solver = WarpEuler1D(N, 1.0/N, gamma=GAMMA, bc="outflow", device="cuda", scheme="weno5z-rk3")
         solver.initialize(Q0); solver.run(T_END, CFL); wp.synchronize()
         rho, u, p = cons_to_prim(solver.state, GAMMA)
         del solver; gc.collect()
         res["Warp WENO5-Z (f32)"] = (rho, u, p)
-        print("  done")
+        print(f"  L1(rho)={l1_error(rho, rho_ex, dx):.3e}")
     except Exception as e:
         print(f"  ERROR: {e}")
 
-    if not res:
-        print("No results to plot."); return
-
-    # Profile agreement: JaxFluids f64 vs Warp f32
-    if "JaxFluids (WENO5-Z, f64)" in res and "Warp WENO5-Z (f32)" in res:
-        r64, _, _ = res["JaxFluids (WENO5-Z, f64)"]
-        rw,  _, _ = res["Warp WENO5-Z (f32)"]
-        print(f"\n-- Profile agreement at N={N} --")
-        print(f"  L1(rho) JaxFluids-f64 vs Warp-f32 = {float(np.mean(np.abs(r64 - rw))):.3e}")
-    if "JaxFluids (WENO5-Z, f32)" in res and "JaxFluids (WENO5-Z, f64)" in res:
-        r32, _, _ = res["JaxFluids (WENO5-Z, f32)"]
-        r64, _, _ = res["JaxFluids (WENO5-Z, f64)"]
-        print(f"  L1(rho) JaxFluids-f32 vs JaxFluids-f64 = {float(np.mean(np.abs(r32 - r64))):.3e}")
+    print(f"\n-- Accuracy vs exact Riemann (N={N}, t={T_END}) --")
+    print(f"{'Solver':<35}  {'L1(rho)':>10}  {'L1(u)':>10}  {'L1(p)':>10}")
+    for name, (rho, u, p) in res.items():
+        print(f"  {name:<33}  {l1_error(rho,rho_ex,dx):>10.3e}"
+              f"  {l1_error(u,u_ex,dx):>10.3e}  {l1_error(p,p_ex,dx):>10.3e}")
 
     # save CSV
     with open(OUT / "precision_profiles_N512.csv", "w", newline="") as f:
         w = csv.writer(f)
-        hdr = ["x"]
+        hdr = ["x", "rho_exact", "u_exact", "p_exact"]
         for name in res:
             tag = name.replace(" ", "_").replace("(","").replace(")","").replace(",","")
             hdr += [f"rho_{tag}", f"u_{tag}", f"p_{tag}"]
         w.writerow(hdr)
         for j in range(N):
-            row = [x[j]]
+            row = [x[j], rho_ex[j], u_ex[j], p_ex[j]]
             for rho, u, p in res.values():
                 row += [rho[j], u[j], p[j]]
             w.writerow(row)
     print(f"\nSaved -> {OUT/'precision_profiles_N512.csv'}")
 
-    # IC for reference
-    Q0_ic, x_ic = shu_ic(N, GAMMA)
-    from warplabs_fluids.utils import cons_to_prim as c2p
-    rho0, u0, p0 = c2p(Q0_ic, GAMMA)
-
-    fields  = ["density  rho", "velocity  u", "pressure  p"]
-    ic_vals = [rho0, u0, p0]
+    # plot
+    fields = ["density  rho", "velocity  u", "pressure  p"]
+    exact_v = [rho_ex, u_ex, p_ex]
     fkeys   = ["rho", "u", "p"]
-
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
     fig.suptitle(
-        f"Shu-Osher  |  N={N}  |  t={T_END}  |  WENO5-Z+HLLC+RK3\n"
+        f"Sod shock tube  |  N={N}  |  t={T_END}  |  WENO5-Z+HLLC+RK3\n"
         "Precision comparison: JaxFluids fp32 vs fp64 vs Warp fp32",
         fontsize=10, fontweight="bold")
-    for ax, fname, iv, fk in zip(axes, fields, ic_vals, fkeys):
-        ax.plot(x_ic, iv, color="0.72", lw=1.0, ls=":", label="t=0 (IC)", zorder=1)
+    for ax, fname, ev, fk in zip(axes, fields, exact_v, fkeys):
+        ax.plot(x, ev, "k-", lw=2.0, label="exact Riemann", zorder=5)
         for name, (rho, u, p) in res.items():
             vals = {"rho": rho, "u": u, "p": p}
             m, ls = STYLES.get(name, ("o", "-"))
             ax.plot(x, vals[fk], color=COLORS.get(name, "#555"),
                     lw=1.4, ls=ls, label=name, alpha=0.85)
         ax.set_xlabel("x"); ax.set_title(fname)
-        ax.set_xlim(0, L)
         ax.legend(fontsize=7); ax.grid(True, lw=0.4, alpha=0.5)
     plt.tight_layout()
     fig.savefig(OUT / "precision_comparison.png", dpi=150, bbox_inches="tight")

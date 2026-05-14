@@ -1,9 +1,9 @@
-# warplabs-fluids — Claude Context
+# warpfluids — Claude Context
 
 ## What this is
 
 Experimental Warp-native compressible flow solver, living at
-`C:\Vibe Coding\warp-projects\projects\warplabs_fluids\`.
+`C:\Vibe Coding\warp-projects\projects\warpfluids\`.
 
 Goal: port a JAX-based CFD solver to Warp, prove behavioral equivalence via V&V,
 then benchmark to show GPU throughput advantage. Long-term reference: JaxFluids.
@@ -42,7 +42,7 @@ update_rk_1d       1 launch   SSP-RK2 stage: Q_out = alpha*Q0 + beta*Q_in + coef
 ### File layout
 
 ```
-warplabs_fluids/
+warpfluids/
   kernels/
     primitives.py    @wp.func  cons<->prim conversion
     reconstruct.py   @wp.func  weno3_left, weno3_right
@@ -216,7 +216,7 @@ Remaining files (kept for tests): bc.py, flux.py, update.py.
 ## Running
 
 ```powershell
-# From projects/warplabs_fluids/
+# From projects/warpfluids/
 
 # Tests (CPU only, no GPU needed)
 python -m pytest tests/ -v

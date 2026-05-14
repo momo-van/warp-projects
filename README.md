@@ -38,7 +38,7 @@ Additional per-project dependencies are listed in each project's own `README.md`
 
 | Project | Domain | Description |
 |---|---|---|
-| [`warplabs_fluids`](projects/warplabs_fluids/) | Compressible CFD | 1-D Euler solver (WENO5-Z + HLLC + SSP-RK3), validated against JaxFluids. Phase 1 complete. |
+| [`warpfluids`](projects/warpfluids/) | Compressible CFD | 1-D Euler solver (WENO5-Z + HLLC + SSP-RK3), validated against JaxFluids. Phase 1 complete. |
 
 ---
 

@@ -1,4 +1,4 @@
-# warplabs-fluids
+# warpfluids
 
 Experimental GPU-accelerated compressible flow solver built on [NVIDIA Warp](https://github.com/NVIDIA/warp).
 Goal: a full Warp backend for [JaxFluids](https://github.com/tumaer/JAXFLUIDS) — same algorithm, same results, orders-of-magnitude faster on GPU.
@@ -48,7 +48,7 @@ pip install warp-lang numpy scipy matplotlib
 
 ```python
 import numpy as np
-from warplabs_fluids import WarpEuler1D, prim_to_cons
+from warpfluids import WarpEuler1D, prim_to_cons
 
 N, gamma = 512, 1.4
 dx = 1.0 / N
@@ -84,7 +84,7 @@ Warp CUDA throughput: **183× faster** (Sod) and **111× faster** (Shu-Osher) vs
 ## Tests
 
 ```bash
-# From projects/warplabs_fluids/
+# From projects/warpfluids/
 python -m pytest tests/ -v
 ```
 

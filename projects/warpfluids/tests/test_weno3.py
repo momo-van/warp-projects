@@ -12,7 +12,7 @@ import pytest
 
 warp = pytest.importorskip("warp")
 
-from warplabs_fluids.kernels.reconstruct import weno3_left, weno3_right
+from warpfluids.kernels.reconstruct import weno3_left, weno3_right
 
 
 @wp.kernel

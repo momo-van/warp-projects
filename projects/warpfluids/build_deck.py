@@ -1,8 +1,8 @@
 """
-8-slide deck — warplabs-fluids WENO5-Z apples-to-apples results.
+8-slide deck — warpfluids WENO5-Z apples-to-apples results.
 White background · Segoe UI · larger type.
 
-python build_deck.py   →   warplabs_fluids_deck.pptx
+python build_deck.py   →   warpfluids_deck.pptx
 """
 
 from pathlib import Path
@@ -16,7 +16,7 @@ HERE  = Path(__file__).parent
 BENCH = HERE / "benchmarks"
 SOD   = BENCH / "sod"
 SHO   = BENCH / "shu_osher"
-OUT   = HERE / "warplabs_fluids_deck.pptx"
+OUT   = HERE / "warpfluids_deck.pptx"
 
 # ── palette ───────────────────────────────────────────────────────────────────
 GREEN  = RGBColor(0x76, 0xB9, 0x00)
@@ -101,7 +101,7 @@ def green_bar(s, h=0.12):
 
 def bottom_bar(s):
     rect(s, 0, 7.28, 13.333, 0.22, bg=PANEL2)
-    txt(s, "NVIDIA  ·  Warp  ·  warplabs-fluids  ·  Phase 1",
+    txt(s, "NVIDIA  ·  Warp  ·  warpfluids  ·  Phase 1",
         0.35, 7.30, 9, 0.20, sz=10, color=GRAY)
     txt(s, "RTX 5000 Ada  ·  Warp 1.12.1  ·  JAX 0.6.2",
         9.5, 7.30, 3.6, 0.20, sz=10, color=GRAY, align=PP_ALIGN.RIGHT)

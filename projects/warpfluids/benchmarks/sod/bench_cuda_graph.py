@@ -13,7 +13,7 @@ Outputs:
   cuda_graph_benchmark.csv   — all six columns per N
   cuda_graph_scaling.png     — log-log throughput vs N (all six)
 
-Run from projects/warplabs_fluids/ inside the JaxFluids venv on WSL2:
+Run from projects/warpfluids/ inside the JaxFluids venv on WSL2:
   source /root/venv-jf/bin/activate
   XLA_PYTHON_CLIENT_PREALLOCATE=false python benchmarks/sod/bench_cuda_graph.py
 """
@@ -35,7 +35,7 @@ JXF_EX = Path("/root/JAXFLUIDS/examples/examples_1D/02_sod_shock_tube")
 
 sys.path.insert(0, str(ROOT))
 
-from warplabs_fluids import WarpEuler1D
+from warpfluids import WarpEuler1D
 from cases.sod import ic as sod_ic
 
 # Grid sizes: full range for Warp; JaxFluids capped at JXF_MAX_N

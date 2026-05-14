@@ -11,7 +11,7 @@ Exact solution via iterative pressure solver (Toro 2009, Ch. 4).
 import numpy as np
 from scipy.optimize import brentq
 
-from warplabs_fluids.utils import prim_to_cons
+from warpfluids.utils import prim_to_cons
 
 
 # ---------- Initial condition -----------------------------------------------

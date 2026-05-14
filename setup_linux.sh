@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # setup_linux.sh
-# Configure Ubuntu / WSL2 for warplabs-fluids GPU benchmarks.
+# Configure Ubuntu / WSL2 for warpfluids GPU benchmarks.
 #
 # Run from the repo root:
 #   bash setup_linux.sh
@@ -14,10 +14,10 @@
 
 set -euo pipefail
 
-VENV_DIR="$HOME/venv-warplabs"
+VENV_DIR="$HOME/venv-warpfluids"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "=== warplabs-fluids Linux / WSL2 setup ==="
+echo "=== warpfluids Linux / WSL2 setup ==="
 echo "    Repo: $SCRIPT_DIR"
 echo ""
 
@@ -124,10 +124,10 @@ echo ""
 echo "=== Setup complete! ==="
 echo ""
 echo "Activate in future sessions:"
-echo "  source ~/venv-warplabs/bin/activate"
+echo "  source ~/venv-warpfluids/bin/activate"
 echo ""
 echo "Run benchmarks:"
-echo "  cd $SCRIPT_DIR/projects/warplabs_fluids"
+echo "  cd $SCRIPT_DIR/projects/warpfluids"
 echo "  python -m pytest tests/ -v"
 echo "  python benchmarks/compare_sod.py"
 echo "  python benchmarks/scaling_benchmark.py"

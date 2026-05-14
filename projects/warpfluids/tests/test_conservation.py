@@ -10,7 +10,7 @@ import pytest
 
 warp = pytest.importorskip("warp")
 
-from warplabs_fluids import WarpEuler1D, prim_to_cons
+from warpfluids import WarpEuler1D, prim_to_cons
 
 
 def _smooth_ic(N: int, gamma=1.4):

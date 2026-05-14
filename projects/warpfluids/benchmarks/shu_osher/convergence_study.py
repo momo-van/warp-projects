@@ -11,7 +11,7 @@ Saves (to benchmarks/shu_osher/):
   shu_osher_convergence.png
   convergence.csv
 
-Run from projects/warplabs_fluids/:
+Run from projects/warpfluids/:
   python benchmarks/shu_osher/convergence_study.py
 """
 
@@ -28,7 +28,7 @@ ROOT = Path(__file__).parent.parent.parent
 OUT  = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
-from warplabs_fluids import WarpEuler1D, cons_to_prim
+from warpfluids import WarpEuler1D, cons_to_prim
 from cases.shu_osher import ic as shu_ic, L, T_END, GAMMA
 
 GRID_SIZES = [256, 512, 1024, 2048]

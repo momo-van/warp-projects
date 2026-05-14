@@ -9,7 +9,7 @@ Saves (to benchmarks/sod/):
   sod_convergence.png
   convergence.csv
 
-Run from projects/warplabs_fluids/:
+Run from projects/warpfluids/:
   source /root/venv-jf/bin/activate   # or omit for Warp-only
   python benchmarks/sod/convergence_study.py
 """
@@ -28,7 +28,7 @@ JXF_EX = Path("/root/JAXFLUIDS/examples/examples_1D/02_sod_shock_tube")
 
 sys.path.insert(0, str(ROOT))
 
-from warplabs_fluids import WarpEuler1D, cons_to_prim, l1_error
+from warpfluids import WarpEuler1D, cons_to_prim, l1_error
 from cases.sod import ic as sod_ic, exact as sod_exact
 
 GRID_SIZES  = [64, 128, 256, 512, 1024]
